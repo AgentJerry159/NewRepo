@@ -1,4 +1,9 @@
-"""Clickable desktop launcher for the resumable Py-Feat fatigue debugger."""
+"""Clickable desktop launcher for the resumable Py-Feat fatigue debugger.
+
+Double-click ``启动微表情调试界面.bat`` in this folder.  This window only
+collects settings and starts the audited command-line core in the background;
+it does not implement a second, divergent analysis pipeline.
+"""
 
 from __future__ import annotations
 
@@ -11,22 +16,33 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+
 APP_DIR = Path(__file__).resolve().parent
 CORE_SCRIPT = APP_DIR / "fatigue_pyfeat_debug.py"
 CORE_MODE_FLAG = "--pyfeat-run-core"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
+# A frozen application lives beside the user-visible EXE.  Source mode lives
+# beside this .py file.  Neither path depends on a drive letter or username.
 if IS_FROZEN:
     APP_DIR = Path(sys.executable).resolve().parent
 
 
 def build_core_command(core_arguments: list[str]) -> list[str]:
+    """Create a path-independent child-process command for the analysis core.
+
+    Source mode uses the same Python interpreter that opened the GUI.  A
+    future PyInstaller build launches the same EXE in an explicit core mode,
+    rather than trying to run an unavailable external .py script.
+    """
     if IS_FROZEN:
         return [str(Path(sys.executable)), CORE_MODE_FLAG, *core_arguments]
     return [str(Path(sys.executable)), str(CORE_SCRIPT), *core_arguments]
 
 
 def run_bundled_core() -> int:
+    """Dispatch the PyInstaller child process to the bundled core module."""
     from fatigue_pyfeat_debug import main as core_main
+
     if len(sys.argv) < 2 or sys.argv[1] != CORE_MODE_FLAG:
         raise RuntimeError("未找到内置分析核心的启动标记。")
     sys.argv = [sys.argv[0], *sys.argv[2:]]
@@ -34,6 +50,7 @@ def run_bundled_core() -> int:
 
 
 def default_input_root() -> Path:
+    """Use the current common data-folder name when it exists; otherwise stay blank."""
     for name in ("正式实验数据", "测试实验数据"):
         candidate = APP_DIR.parent / name
         if candidate.is_dir():
@@ -47,6 +64,7 @@ class DebuggerGUI(tk.Tk):
         self.title("Py-Feat 疲劳视频调试与批处理")
         self.geometry("900x710")
         self.minsize(760, 560)
+
         self.input_root = tk.StringVar(value=str(default_input_root()))
         self.output_root = tk.StringVar(value=str((APP_DIR / "results").resolve()))
         self.device = tk.StringVar(value="cuda")
@@ -57,6 +75,7 @@ class DebuggerGUI(tk.Tk):
         self.messages: queue.Queue[tuple[str, str]] = queue.Queue()
         self.process: subprocess.Popen[str] | None = None
         self.running = False
+
         self._build()
         self.after(100, self._drain_messages)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -66,12 +85,15 @@ class DebuggerGUI(tk.Tk):
         container.pack(fill="both", expand=True)
         container.columnconfigure(1, weight=1)
         container.rowconfigure(6, weight=1)
+
         ttk.Label(container, text="原始视频文件夹：").grid(row=0, column=0, sticky="w", pady=5)
         ttk.Entry(container, textvariable=self.input_root).grid(row=0, column=1, sticky="ew", pady=5)
         ttk.Button(container, text="选择…", command=self._choose_input).grid(row=0, column=2, padx=(8, 0), pady=5)
+
         ttk.Label(container, text="中间暂存／结果文件夹：").grid(row=1, column=0, sticky="w", pady=5)
         ttk.Entry(container, textvariable=self.output_root).grid(row=1, column=1, sticky="ew", pady=5)
         ttk.Button(container, text="选择…", command=self._choose_output).grid(row=1, column=2, padx=(8, 0), pady=5)
+
         options = ttk.LabelFrame(container, text="分析设置", padding=10)
         options.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 8))
         ttk.Label(options, text="设备：").grid(row=0, column=0, sticky="w")
@@ -84,10 +106,32 @@ class DebuggerGUI(tk.Tk):
         ttk.Entry(options, width=10, textvariable=self.batch_size).grid(row=2, column=1, sticky="w", pady=(8, 0))
         ttk.Label(options, text="以RTX 3060 为例建议先用 8；显存不足时改为 4。").grid(row=2, column=2, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Label(options, text="输出字段：").grid(row=3, column=0, sticky="nw", pady=(10, 0))
-        ttk.Radiobutton(options, text="精简指标（推荐，约 35 列）", variable=self.output_profile, value="compact").grid(row=3, column=1, sticky="w", pady=(10, 0))
-        ttk.Radiobutton(options, text="完整 Py-Feat（约 1679 列；会产生大量数据）", variable=self.output_profile, value="full").grid(row=3, column=2, columnspan=2, sticky="w", pady=(10, 0))
-        ttk.Label(options, text="完整模式会保存三维网格、关键点、Blendshape 等高维字段，显著增加磁盘占用、Excel 写入和汇总时间", foreground="#a61c00", wraplength=740).grid(row=4, column=1, columnspan=3, sticky="w", pady=(2, 0))
-        ttk.Label(container, text="文件名须为 受试者-时段-片段，例如 27-1-4.mp4。多批次分析时请始终选择同一个暂存/结果文件夹，完成后点“汇总已有暂存结果”，无需重新分析。", foreground="#555555", wraplength=780).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 8))
+        ttk.Radiobutton(
+            options,
+            text="精简指标（推荐，约 35 列）",
+            variable=self.output_profile,
+            value="compact",
+        ).grid(row=3, column=1, sticky="w", pady=(10, 0))
+        ttk.Radiobutton(
+            options,
+            text="完整 Py-Feat（约 1679 列；会产生大量数据）",
+            variable=self.output_profile,
+            value="full",
+        ).grid(row=3, column=2, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Label(
+            options,
+            text="完整模式会保存三维网格、关键点、Blendshape 等高维字段，显著增加磁盘占用、Excel 写入和汇总时间",
+            foreground="#a61c00",
+            wraplength=740,
+        ).grid(row=4, column=1, columnspan=3, sticky="w", pady=(2, 0))
+
+        ttk.Label(
+            container,
+            text="文件名须为 受试者-时段-片段，例如 27-1-4.mp4。多批次分析时请始终选择同一个暂存/结果文件夹，完成后点“汇总已有暂存结果”，无需重新分析。",
+            foreground="#555555",
+            wraplength=780,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 8))
+
         controls = ttk.Frame(container)
         controls.grid(row=4, column=0, columnspan=3, sticky="w", pady=4)
         self.preflight_button = ttk.Button(controls, text="1. 预检（不分析）", command=lambda: self._start(dry_run=True))
@@ -100,6 +144,7 @@ class DebuggerGUI(tk.Tk):
         self.stop_button.pack(side="left", padx=8)
         self.open_button = ttk.Button(controls, text="打开结果文件夹", command=self._open_output)
         self.open_button.pack(side="left", padx=8)
+
         ttk.Label(container, textvariable=self.status, foreground="#0b5394").grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 4))
         self.log = tk.Text(container, wrap="word", height=18, state="disabled", font=("Consolas", 10))
         self.log.grid(row=6, column=0, columnspan=3, sticky="nsew")
@@ -152,13 +197,29 @@ class DebuggerGUI(tk.Tk):
         if not dry_run:
             profile_warning = ""
             if self.output_profile.get() == "full":
-                profile_warning = "\n\n当前选择“完整 Py-Feat”：约 1679 列，会保存三维网格、关键点和 Blendshape，显著增加磁盘空间、Excel 写入及汇总时间。"
-            if not messagebox.askokcancel("确认开始分析", "将以逐帧方式分析所选文件夹中的视频。已写入的检查点可在中断后续跑。" + profile_warning + "\n\n是否开始？"):
+                profile_warning = (
+                    "\n\n当前选择“完整 Py-Feat”：约 1679 列，会保存三维网格、关键点和 Blendshape，"
+                    "显著增加磁盘空间、Excel 写入及汇总时间。"
+                )
+            confirmed = messagebox.askokcancel(
+                "确认开始分析",
+                "将以逐帧方式分析所选文件夹中的视频。已写入的检查点可在中断后续跑。"
+                + profile_warning + "\n\n是否开始？",
+            )
+            if not confirmed:
                 return
-        args = ["--input-root", str(source), "--output-root", str(output), "--device", self.device.get(), "--sample-fps", self.sample_fps.get(), "--output-profile", self.output_profile.get(), "--batch-size", self.batch_size.get()]
+        core_arguments = [
+            "--input-root", str(source),
+            "--output-root", str(output),
+            "--device", self.device.get(),
+            "--sample-fps", self.sample_fps.get(),
+            "--output-profile", self.output_profile.get(),
+            "--batch-size", self.batch_size.get(),
+        ]
         if dry_run:
-            args.append("--dry-run")
-        self._launch(build_core_command(args), "正在预检…" if dry_run else "正在分析…可用“停止当前任务”安全中止后续跑。")
+            core_arguments.append("--dry-run")
+        command = build_core_command(core_arguments)
+        self._launch(command, "正在预检…" if dry_run else "正在分析…可用“停止当前任务”安全中止后续跑。")
 
     def _start_summary(self) -> None:
         if self.running:
@@ -166,9 +227,14 @@ class DebuggerGUI(tk.Tk):
         output = self._validate_summary_root()
         if output is None:
             return
-        if not messagebox.askokcancel("确认汇总", "会读取该中间暂存文件夹内所有已完成片段的 frame_features.xlsx，重建总 Excel 和统一时间轴。不会重新分析视频。\n\n是否开始？"):
+        confirmed = messagebox.askokcancel(
+            "确认汇总",
+            "会读取该中间暂存文件夹内所有已完成片段的 frame_features.xlsx，重建总 Excel 和统一时间轴。不会重新分析视频。\n\n是否开始？",
+        )
+        if not confirmed:
             return
-        self._launch(build_core_command(["--output-root", str(output), "--summarize-only"]), "正在读取已有暂存结果并生成总表…")
+        command = build_core_command(["--output-root", str(output), "--summarize-only"])
+        self._launch(command, "正在读取已有暂存结果并生成总表…")
 
     def _launch(self, command: list[str], status_message: str) -> None:
         self._append("\n运行：" + " ".join(f'\"{part}\"' if " " in part else part for part in command) + "\n")
@@ -178,22 +244,37 @@ class DebuggerGUI(tk.Tk):
         self.run_button.configure(state="disabled")
         self.summary_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        threading.Thread(target=self._run_subprocess, args=(command,), daemon=True).start()
+        thread = threading.Thread(target=self._run_subprocess, args=(command,), daemon=True)
+        thread.start()
 
     def _run_subprocess(self, command: list[str]) -> None:
         environment = os.environ.copy()
         environment.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            self.process = subprocess.Popen(command, cwd=str(APP_DIR.parent), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.process = subprocess.Popen(
+                command,
+                cwd=str(APP_DIR.parent),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+                creationflags=flags,
+            )
             assert self.process.stdout is not None
             for line in self.process.stdout:
                 self.messages.put(("log", line))
-            self.messages.put(("finished", str(self.process.wait())))
+            code = self.process.wait()
+            self.messages.put(("finished", str(code)))
         except Exception as exc:
             self.messages.put(("error", f"无法启动程序：{type(exc).__name__}: {exc}"))
 
     def _stop(self) -> None:
-        if self.process and self.process.poll() is None and messagebox.askyesno("停止当前任务", "会停止当前批次。已完成的检查点会保留，下次继续时自动跳过。确定停止吗？"):
+        if not self.process or self.process.poll() is not None:
+            return
+        if messagebox.askyesno("停止当前任务", "会停止当前批次。已完成的检查点会保留，下次继续时自动跳过。确定停止吗？"):
             self.process.terminate()
             self._append("已请求停止当前任务；等待程序退出。\n")
             self.status.set("正在停止…")
@@ -252,3 +333,4 @@ if __name__ == "__main__":
     if IS_FROZEN and len(sys.argv) > 1 and sys.argv[1] == CORE_MODE_FLAG:
         raise SystemExit(run_bundled_core())
     DebuggerGUI().mainloop()
+
