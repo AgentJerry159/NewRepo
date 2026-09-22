@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *.log
 _qa_*/
+build_pyinstaller/
+*.spec
 
 # Analysis inputs and personally identifiable visual data
 *.mp4
@@ -30,3 +32,4 @@ sessions/
 preflight_environment.json
 batch_manifest.xlsx
 all_analysis_raw.xlsx
+
