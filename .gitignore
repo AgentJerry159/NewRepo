@@ -1,0 +1,32 @@
+# Python and local diagnostics
+__pycache__/
+*.py[cod]
+*.log
+_qa_*/
+
+# Analysis inputs and personally identifiable visual data
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.m4v
+*.webm
+*.h264
+*.h265
+*.jpg
+*.jpeg
+*.png
+*.bmp
+
+# Generated analysis results and resumable data
+results/
+checkpoint_parts/
+clips/
+sessions/
+*.xlsx
+*.xls
+*.csv
+*.parquet
+preflight_environment.json
+batch_manifest.xlsx
+all_analysis_raw.xlsx
