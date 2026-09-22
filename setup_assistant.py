@@ -125,8 +125,8 @@ class SetupAssistant(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Py-Feat 疲劳分析：安装与启动助手")
-        self.geometry("860x650")
-        self.minsize(720, 520)
+        self.geometry("860x735")
+        self.minsize(720, 600)
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.installing = False
         self.install_started_at: float | None = None
