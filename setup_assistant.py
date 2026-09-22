@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -24,6 +25,14 @@ APP_DIR = Path(__file__).resolve().parent
 ENV_NAME = "pyfeat_fatigue"
 MAIN_GUI = APP_DIR / "fatigue_pyfeat_debug_gui.py"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# These are intentionally broad ranges.  Download speed, mirrors, disk speed,
+# and whether packages are cached make a precise install ETA dishonest.
+INSTALL_STEP_ESTIMATES = {
+    "创建 Python 3.11 环境": 120,
+    "更新 pip": 90,
+    "安装 PyTorch 与 CUDA 组件（最大下载）": 1200,
+    "安装 Py-Feat 与分析依赖": 600,
+}
 
 
 def find_conda() -> str | None:
@@ -120,11 +129,17 @@ class SetupAssistant(tk.Tk):
         self.minsize(720, 520)
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.installing = False
+        self.install_started_at: float | None = None
+        self.current_phase_started_at: float | None = None
+        self.current_phase_estimate_seconds = 0
+        self.remaining_phase_estimates: list[int] = []
         self.conda_status = tk.StringVar(value="尚未检查")
         self.environment_status = tk.StringVar(value="尚未检查")
         self.package_status = tk.StringVar(value="尚未检查")
         self.gpu_status = tk.StringVar(value="尚未检查")
         self.next_step = tk.StringVar(value="正在检查，请稍候。")
+        self.install_progress_text = tk.StringVar(value="尚未开始安装。")
+        self.install_eta_text = tk.StringVar(value="")
         self._build()
         self.after(100, self._drain_messages)
         self.check_environment()
@@ -173,6 +188,19 @@ class SetupAssistant(tk.Tk):
         ttk.Button(buttons, text="没有 Conda？打开安装说明", command=self.open_conda_guide).pack(side="left", padx=8)
         ttk.Button(buttons, text="打开本文件夹", command=lambda: os.startfile(APP_DIR)).pack(side="right")
 
+        progress_box = ttk.LabelFrame(outer, text="安装进度与预计完成时间", padding=10)
+        progress_box.pack(fill="x")
+        ttk.Label(progress_box, textvariable=self.install_progress_text, foreground="#0b5394").pack(anchor="w")
+        self.install_progress = ttk.Progressbar(progress_box, mode="determinate", maximum=1, value=0)
+        self.install_progress.pack(fill="x", pady=(5, 3))
+        ttk.Label(
+            progress_box,
+            textvariable=self.install_eta_text,
+            foreground="#666666",
+            wraplength=790,
+            justify="left",
+        ).pack(anchor="w")
+
         ttk.Label(outer, text="运行记录（安装或修复时会显示每一步；检查环境不会修改系统）：").pack(anchor="w")
         self.log = scrolledtext.ScrolledText(outer, height=18, wrap="word", state="disabled", font=("Consolas", 9))
         self.log.pack(fill="both", expand=True, pady=(4, 0))
@@ -200,15 +228,51 @@ class SetupAssistant(tk.Tk):
                         self._append(str(status["detail"]))
                 elif kind == "log":
                     self._append(str(value))
+                elif kind == "install_phase":
+                    self._set_install_phase(value)
+                elif kind == "install_detail":
+                    self.install_progress_text.set(str(value))
                 elif kind == "install_done":
                     self.installing = False
                     self.install_button.configure(state="normal")
                     self.launch_button.configure(state="normal")
+                    succeeded = bool(value)
                     self._append("安装／修复流程结束；正在重新检查环境。")
+                    if succeeded:
+                        self.install_progress.configure(value=self.install_progress["maximum"])
+                        self.install_progress_text.set("所有安装步骤已完成，正在验证环境。")
+                        self.install_eta_text.set("安装流程已结束，正在自动复查环境是否可用。")
+                    else:
+                        self.install_progress_text.set("安装未完成；请查看下方运行记录中的最后一段报错。")
+                        self.install_eta_text.set("未完成的步骤不会被伪装为成功；修复网络或权限问题后可再次点击“创建／修复 GPU 环境”。")
                     self.check_environment()
         except queue.Empty:
             pass
         self.after(100, self._drain_messages)
+
+    def _set_install_phase(self, phase: dict[str, object]) -> None:
+        self.current_phase_started_at = time.monotonic()
+        self.current_phase_estimate_seconds = int(phase["estimate_seconds"])
+        self.remaining_phase_estimates = [int(item) for item in phase["remaining_estimates"]]
+        self.install_progress.configure(maximum=int(phase["total_steps"]), value=int(phase["step_index"]) - 1)
+        self.install_progress_text.set(
+            f"正在进行第 {phase['step_index']}/{phase['total_steps']} 步：{phase['label']}"
+        )
+        self._refresh_install_clock()
+
+    def _refresh_install_clock(self) -> None:
+        if not self.installing or self.install_started_at is None or self.current_phase_started_at is None:
+            return
+        elapsed_total = int(time.monotonic() - self.install_started_at)
+        elapsed_phase = int(time.monotonic() - self.current_phase_started_at)
+        expected_left = max(0, self.current_phase_estimate_seconds - elapsed_phase) + sum(self.remaining_phase_estimates)
+        low_minutes = max(1, round(expected_left * 0.6 / 60))
+        high_minutes = max(low_minutes, round(expected_left * 1.8 / 60))
+        self.install_eta_text.set(
+            f"已运行 {elapsed_total // 60} 分 {elapsed_total % 60} 秒；当前步骤已运行 {elapsed_phase // 60} 分 {elapsed_phase % 60} 秒。"
+            f" 预计还需约 {low_minutes}–{high_minutes} 分钟（受网络、下载镜像和磁盘速度影响，会自动更新）。"
+        )
+        self.after(1000, self._refresh_install_clock)
 
     def _apply_guidance(self, status: dict[str, object]) -> None:
         """Turn technical checks into the one click the user should make next."""
@@ -260,6 +324,7 @@ class SetupAssistant(tk.Tk):
         if not approved:
             return
         self.installing = True
+        self.install_started_at = time.monotonic()
         self.install_button.configure(state="disabled")
         self.launch_button.configure(state="disabled")
         threading.Thread(target=self.install_environment, args=(conda,), daemon=True).start()
@@ -271,17 +336,26 @@ class SetupAssistant(tk.Tk):
             exists = any(Path(item).name.lower() == ENV_NAME for item in json.loads(environment_text).get("envs", []))
         except json.JSONDecodeError:
             exists = False
-        commands: list[list[str]] = []
+        steps: list[tuple[str, list[str]]] = []
         if exists:
             self.messages.put(("log", f"检测到现有环境 {ENV_NAME}；将只修复／补齐依赖，不会删除该环境。"))
         else:
-            commands.append([conda, "create", "-n", ENV_NAME, "python=3.11", "-y"])
-        commands += [
-            [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "--upgrade", "pip"],
-            [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "torch==2.7.1+cu118", "torchvision==0.22.1+cu118", "--index-url", "https://download.pytorch.org/whl/cu118"],
-            [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "py-feat==2.1.3", "opencv-python", "openpyxl", "matplotlib"],
+            steps.append(("创建 Python 3.11 环境", [conda, "create", "-n", ENV_NAME, "python=3.11", "-y"]))
+        steps += [
+            ("更新 pip", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "--upgrade", "pip"]),
+            ("安装 PyTorch 与 CUDA 组件（最大下载）", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "torch==2.7.1+cu118", "torchvision==0.22.1+cu118", "--index-url", "https://download.pytorch.org/whl/cu118"]),
+            ("安装 Py-Feat 与分析依赖", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "py-feat==2.1.3", "opencv-python", "openpyxl", "matplotlib"]),
         ]
-        for command in commands:
+        total_steps = len(steps)
+        succeeded = True
+        for step_index, (label, command) in enumerate(steps, start=1):
+            self.messages.put(("install_phase", {
+                "label": label,
+                "step_index": step_index,
+                "total_steps": total_steps,
+                "estimate_seconds": INSTALL_STEP_ESTIMATES[label],
+                "remaining_estimates": [INSTALL_STEP_ESTIMATES[item[0]] for item in steps[step_index:]],
+            }))
             self.messages.put(("log", "$ " + subprocess.list2cmdline(command)))
             process = subprocess.Popen(
                 command, cwd=APP_DIR, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -289,11 +363,18 @@ class SetupAssistant(tk.Tk):
             )
             assert process.stdout is not None
             for line in process.stdout:
+                if "Downloading" in line:
+                    self.messages.put(("install_detail", f"正在下载：{label}（下载速度会影响预计完成时间）"))
+                elif "Installing collected packages" in line:
+                    self.messages.put(("install_detail", f"正在安装到本机：{label}"))
+                elif "Successfully installed" in line:
+                    self.messages.put(("install_detail", f"正在完成本步骤：{label}"))
                 self.messages.put(("log", line.rstrip()))
             if process.wait() != 0:
                 self.messages.put(("log", "安装未完成：请复制上方最后的报错信息以便排查。"))
+                succeeded = False
                 break
-        self.messages.put(("install_done", None))
+        self.messages.put(("install_done", succeeded))
 
     def launch_analysis(self) -> None:
         conda = find_conda()
