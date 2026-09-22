@@ -25,6 +25,15 @@ APP_DIR = Path(__file__).resolve().parent
 ENV_NAME = "pyfeat_fatigue"
 MAIN_GUI = APP_DIR / "fatigue_pyfeat_debug_gui.py"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+# A one-file EXE extracts itself to a temporary folder.  The visible EXE's
+# folder is where the downloaded source files live, so use it in frozen mode.
+if IS_FROZEN:
+    APP_DIR = Path(sys.executable).resolve().parent
+    MAIN_GUI = APP_DIR / "fatigue_pyfeat_debug_gui.py"
+TUNA_PYPI = "https://pypi.tuna.tsinghua.edu.cn/simple"
+PYPI_OFFICIAL = "https://pypi.org/simple"
+PYTORCH_CU118 = "https://download.pytorch.org/whl/cu118"
 # These are intentionally broad ranges.  Download speed, mirrors, disk speed,
 # and whether packages are cached make a precise install ETA dishonest.
 INSTALL_STEP_ESTIMATES = {
@@ -140,6 +149,7 @@ class SetupAssistant(tk.Tk):
         self.next_step = tk.StringVar(value="正在检查，请稍候。")
         self.install_progress_text = tk.StringVar(value="尚未开始安装。")
         self.install_eta_text = tk.StringVar(value="")
+        self.download_route = tk.StringVar(value="official")
         self._build()
         self.after(100, self._drain_messages)
         self.check_environment()
@@ -187,6 +197,28 @@ class SetupAssistant(tk.Tk):
         self.launch_button.pack(side="left", padx=8)
         ttk.Button(buttons, text="没有 Conda？打开安装说明", command=self.open_conda_guide).pack(side="left", padx=8)
         ttk.Button(buttons, text="打开本文件夹", command=lambda: os.startfile(APP_DIR)).pack(side="right")
+
+        source_box = ttk.LabelFrame(outer, text="首次下载线路", padding=10)
+        source_box.pack(fill="x", pady=(10, 0))
+        ttk.Radiobutton(
+            source_box,
+            text="官方线路（默认）",
+            variable=self.download_route,
+            value="official",
+        ).pack(side="left")
+        ttk.Radiobutton(
+            source_box,
+            text="国内网络优先（清华 PyPI 镜像）",
+            variable=self.download_route,
+            value="tuna",
+        ).pack(side="left", padx=16)
+        ttk.Label(
+            source_box,
+            text="说明：Py-Feat 等常规依赖按所选线路下载；CUDA 版 PyTorch 始终使用官方专用源，以保持版本匹配。",
+            foreground="#666666",
+            wraplength=780,
+            justify="left",
+        ).pack(anchor="w", pady=(6, 0))
 
         progress_box = ttk.LabelFrame(outer, text="安装进度与预计完成时间", padding=10)
         progress_box.pack(fill="x")
@@ -327,9 +359,9 @@ class SetupAssistant(tk.Tk):
         self.install_started_at = time.monotonic()
         self.install_button.configure(state="disabled")
         self.launch_button.configure(state="disabled")
-        threading.Thread(target=self.install_environment, args=(conda,), daemon=True).start()
+        threading.Thread(target=self.install_environment, args=(conda, self.download_route.get()), daemon=True).start()
 
-    def install_environment(self, conda: str) -> None:
+    def install_environment(self, conda: str, route: str) -> None:
         # Keep package versions explicit: the tested Windows CUDA 11.8 set.
         _, environment_text = run_capture([conda, "env", "list", "--json"])
         try:
@@ -341,10 +373,16 @@ class SetupAssistant(tk.Tk):
             self.messages.put(("log", f"检测到现有环境 {ENV_NAME}；将只修复／补齐依赖，不会删除该环境。"))
         else:
             steps.append(("创建 Python 3.11 环境", [conda, "create", "-n", ENV_NAME, "python=3.11", "-y"]))
+        pip_index = ["--index-url", PYPI_OFFICIAL]
+        if route == "tuna":
+            pip_index = ["--index-url", TUNA_PYPI, "--extra-index-url", PYPI_OFFICIAL]
+            self.messages.put(("log", "下载线路：国内网络优先（清华 PyPI 镜像）；CUDA 版 PyTorch 仍从官方专用源下载。"))
+        else:
+            self.messages.put(("log", "下载线路：官方 PyPI 与官方 PyTorch 源。"))
         steps += [
-            ("更新 pip", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "--upgrade", "pip"]),
-            ("安装 PyTorch 与 CUDA 组件（最大下载）", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "torch==2.7.1+cu118", "torchvision==0.22.1+cu118", "--index-url", "https://download.pytorch.org/whl/cu118"]),
-            ("安装 Py-Feat 与分析依赖", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "py-feat==2.1.3", "opencv-python", "openpyxl", "matplotlib"]),
+            ("更新 pip", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "--upgrade", "pip", *pip_index]),
+            ("安装 PyTorch 与 CUDA 组件（最大下载）", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "torch==2.7.1+cu118", "torchvision==0.22.1+cu118", "--index-url", PYTORCH_CU118, "--extra-index-url", TUNA_PYPI if route == "tuna" else PYPI_OFFICIAL]),
+            ("安装 Py-Feat 与分析依赖", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "py-feat==2.1.3", "opencv-python", "openpyxl", "matplotlib", *pip_index]),
         ]
         total_steps = len(steps)
         succeeded = True
