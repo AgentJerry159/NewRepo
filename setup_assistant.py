@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
@@ -169,6 +170,7 @@ class SetupAssistant(tk.Tk):
         self.install_button.pack(side="left", padx=8)
         self.launch_button = ttk.Button(buttons, text="打开分析界面", command=self.launch_analysis)
         self.launch_button.pack(side="left", padx=8)
+        ttk.Button(buttons, text="没有 Conda？打开安装说明", command=self.open_conda_guide).pack(side="left", padx=8)
         ttk.Button(buttons, text="打开本文件夹", command=lambda: os.startfile(APP_DIR)).pack(side="right")
 
         ttk.Label(outer, text="运行记录（安装或修复时会显示每一步；检查环境不会修改系统）：").pack(anchor="w")
@@ -240,6 +242,10 @@ class SetupAssistant(tk.Tk):
             return
         self._append("正在检查 Conda、分析环境、关键依赖和 CUDA……")
         threading.Thread(target=lambda: self.messages.put(("status", inspect_environment())), daemon=True).start()
+
+    def open_conda_guide(self) -> None:
+        """Open the official installer instructions only after the user clicks."""
+        webbrowser.open("https://docs.anaconda.com/miniconda/", new=2)
 
     def confirm_install(self) -> None:
         conda = find_conda()
