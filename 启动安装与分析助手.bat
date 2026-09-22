@@ -17,6 +17,9 @@ if not errorlevel 1 (
 )
 
 echo Cannot find Conda or Python 3.11.
-echo Please install Miniconda or Anaconda first, then double-click this file again.
+echo Opening the official Miniconda installation instructions in your browser.
+echo Install Miniconda or Anaconda first, then double-click this file again.
+start "" "https://docs.anaconda.com/miniconda/"
 pause
 exit /b 1
+
