@@ -55,10 +55,15 @@ def inspect_environment() -> dict[str, str]:
         "packages": "未检查",
         "gpu": "未检查",
         "detail": "",
+        "conda_ok": False,
+        "environment_ok": False,
+        "packages_ok": False,
+        "gpu_ok": False,
     }
     if not conda:
         return result
     result["conda"] = conda
+    result["conda_ok"] = True
     code, env_text = run_capture([conda, "env", "list", "--json"])
     if code != 0:
         result["environment"] = "Conda 无法列出环境"
@@ -73,6 +78,7 @@ def inspect_environment() -> dict[str, str]:
         result["environment"] = f"未找到环境 {ENV_NAME}"
         return result
     result["environment"] = f"已找到：{matching[0]}"
+    result["environment_ok"] = True
     probe = (
         "import importlib.metadata as m, json; "
         "names=['py-feat','torch','torchvision','opencv-python','openpyxl','matplotlib']; "
@@ -93,8 +99,10 @@ def inspect_environment() -> dict[str, str]:
         result["packages"] = "已安装：" + "；".join(
             f"{name} {version}" for name, version in versions.items()
         )
+        result["packages_ok"] = True
         if info["cuda_available"]:
             result["gpu"] = f"可用：{info['device']}（CUDA {info['torch_cuda']}）"
+            result["gpu_ok"] = True
         else:
             result["gpu"] = "未检测到可用 CUDA；仍可在主界面选择 CPU"
     except (json.JSONDecodeError, KeyError, IndexError):
@@ -115,6 +123,7 @@ class SetupAssistant(tk.Tk):
         self.environment_status = tk.StringVar(value="尚未检查")
         self.package_status = tk.StringVar(value="尚未检查")
         self.gpu_status = tk.StringVar(value="尚未检查")
+        self.next_step = tk.StringVar(value="正在检查，请稍候。")
         self._build()
         self.after(100, self._drain_messages)
         self.check_environment()
@@ -142,6 +151,16 @@ class SetupAssistant(tk.Tk):
             ttk.Label(card, text=f"{label}：", width=12).grid(row=row, column=0, sticky="nw", pady=3)
             ttk.Label(card, textvariable=variable, wraplength=670, justify="left").grid(row=row, column=1, sticky="w", pady=3)
         card.columnconfigure(1, weight=1)
+
+        guidance = ttk.LabelFrame(outer, text="下一步怎么做", padding=10)
+        guidance.pack(fill="x", pady=(10, 0))
+        ttk.Label(
+            guidance,
+            textvariable=self.next_step,
+            foreground="#0b5394",
+            justify="left",
+            wraplength=790,
+        ).pack(anchor="w")
 
         buttons = ttk.Frame(outer)
         buttons.pack(fill="x", pady=12)
@@ -173,6 +192,7 @@ class SetupAssistant(tk.Tk):
                     self.environment_status.set(str(status["environment"]))
                     self.package_status.set(str(status["packages"]))
                     self.gpu_status.set(str(status["gpu"]))
+                    self._apply_guidance(status)
                     self._append("环境检查完成。")
                     if status.get("detail"):
                         self._append(str(status["detail"]))
@@ -187,6 +207,33 @@ class SetupAssistant(tk.Tk):
         except queue.Empty:
             pass
         self.after(100, self._drain_messages)
+
+    def _apply_guidance(self, status: dict[str, object]) -> None:
+        """Turn technical checks into the one click the user should make next."""
+        if not status.get("conda_ok"):
+            self.next_step.set(
+                "第 1 步：本电脑未安装 Conda。请先安装 Miniconda 或 Anaconda；安装完成后重新双击本助手，再点“检查环境”。"
+            )
+            self.install_button.configure(state="disabled")
+            self.launch_button.configure(state="disabled")
+        elif not status.get("environment_ok") or not status.get("packages_ok"):
+            self.next_step.set(
+                "下一步：直接点击“创建／修复 GPU 环境”。它会自动新建或补齐 pyfeat_fatigue 环境；首次约需 7 GB 磁盘和较长下载时间。"
+            )
+            self.install_button.configure(state="normal")
+            self.launch_button.configure(state="disabled")
+        elif not status.get("gpu_ok"):
+            self.next_step.set(
+                "环境已经可用。可点击“打开分析界面”，并在主界面选择 CPU；若要用 GPU，请另行安装/更新 NVIDIA 驱动后再次检查。"
+            )
+            self.install_button.configure(state="normal")
+            self.launch_button.configure(state="normal")
+        else:
+            self.next_step.set(
+                "已全部就绪：现在直接点击“打开分析界面”。主界面中先选视频文件夹和结果文件夹，再点“1. 预检（不分析）”。"
+            )
+            self.install_button.configure(state="normal")
+            self.launch_button.configure(state="normal")
 
     def check_environment(self) -> None:
         if self.installing:
