@@ -2,6 +2,12 @@
 setlocal
 set "APP_DIR=%~dp0"
 
+rem Prefer the small packaged helper when it is distributed beside the source files.
+if exist "%APP_DIR%PyFeatSetupAssistant.exe" (
+    start "" "%APP_DIR%PyFeatSetupAssistant.exe"
+    exit /b 0
+)
+
 rem Prefer Conda's base Python: this works before the analysis environment exists.
 where conda >nul 2>nul
 if not errorlevel 1 (
