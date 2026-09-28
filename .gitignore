@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *.log
+setup_launcher_error.log
 _qa_*/
 build_pyinstaller/
 *.spec
@@ -32,4 +33,3 @@ sessions/
 preflight_environment.json
 batch_manifest.xlsx
 all_analysis_raw.xlsx
-
