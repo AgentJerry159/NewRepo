@@ -28,13 +28,17 @@ function Find-Conda {
     }
     $candidates = @(
         (Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"),
-        (Join-Path $env:USERPROFILE "anaconda3\Scripts\conda.exe")
+        (Join-Path $env:USERPROFILE "miniconda3\condabin\conda.bat"),
+        (Join-Path $env:USERPROFILE "anaconda3\Scripts\conda.exe"),
+        (Join-Path $env:USERPROFILE "anaconda3\condabin\conda.bat")
     )
     if ($env:LOCALAPPDATA) {
         $candidates += Join-Path $env:LOCALAPPDATA "miniconda3\Scripts\conda.exe"
+        $candidates += Join-Path $env:LOCALAPPDATA "miniconda3\condabin\conda.bat"
     }
     if ($env:PROGRAMDATA) {
         $candidates += Join-Path $env:PROGRAMDATA "miniconda3\Scripts\conda.exe"
+        $candidates += Join-Path $env:PROGRAMDATA "miniconda3\condabin\conda.bat"
     }
     foreach ($candidate in $candidates) {
         if (Test-Path -LiteralPath $candidate) {
@@ -62,15 +66,15 @@ try {
         exit 0
     }
     if (-not $conda) {
-        $answer = Show-Dialog -Title "Conda was not found" -Message "Conda was not found in the usual folders. If you installed it in another folder, choose No and select conda.exe manually. Choose Yes only if Conda was not installed completely and you need the official Miniconda installer." -Buttons "YesNoCancel" -Icon "Information"
+        $answer = Show-Dialog -Title "Conda was not found" -Message "Conda was not found in the usual folders. If you installed it in another folder, choose No and select conda.exe or conda.bat manually. Choose Yes only if Conda was not installed completely and you need the official Miniconda installer." -Buttons "YesNoCancel" -Icon "Information"
         if ($answer -eq "Yes") {
             Start-Process "https://pro.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
             exit 0
         }
         if ($answer -eq "No") {
             $picker = New-Object Microsoft.Win32.OpenFileDialog
-            $picker.Title = "Select conda.exe"
-            $picker.Filter = "Conda executable (conda.exe)|conda.exe|Executable files (*.exe)|*.exe"
+            $picker.Title = "Select conda.exe or conda.bat"
+            $picker.Filter = "Conda launcher (conda.exe;conda.bat)|conda.exe;conda.bat|Executable files (*.exe)|*.exe|Batch files (*.bat)|*.bat"
             $picker.FileName = "conda.exe"
             if ($picker.ShowDialog()) {
                 $conda = $picker.FileName
@@ -101,3 +105,4 @@ catch {
     Show-Dialog -Title "Setup assistant could not open" -Message ("The setup window did not open. Please send a screenshot of this message and the file setup_launcher_error.log.\n\n" + $_.Exception.Message) -Icon "Error" | Out-Null
     exit 1
 }
+
