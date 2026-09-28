@@ -102,6 +102,27 @@ def run_capture(command: list[str]) -> tuple[int, str]:
     return completed.returncode, completed.stdout.strip()
 
 
+def install_failure_hint(label: str, output: str) -> str:
+    """Translate common first-install failures into a safe next action."""
+    if "CondaToSNonInteractiveError" in output:
+        return (
+            "Conda 条款尚未确认：请在 Conda Prompt 中按提示逐条运行 conda tos accept 命令，"
+            "确认后重新点击“创建／修复 GPU 环境”。"
+        )
+    if "NameResolutionError" in output or "download-r2.pytorch.org" in output:
+        return (
+            "PyTorch 官方下载地址暂时无法解析或连接中断。环境本身已经保留，无需重建；"
+            "关闭其他正在安装的窗口，确认网络恢复后，重新点击“创建／修复 GPU 环境”。"
+            "切换“官方／国内网络优先”不会改变 CUDA 版 PyTorch 的官方下载地址。"
+        )
+    if "[WinError 32]" in output:
+        return (
+            "下载临时文件被其他程序占用。请关闭其他安装窗口、资源管理器中正在预览的下载文件，"
+            "必要时重启电脑后重新点击“创建／修复 GPU 环境”。"
+        )
+    return f"{label} 未完成：请查看上方运行记录中的最后一段报错，然后可再次点击“创建／修复 GPU 环境”。"
+
+
 def inspect_environment() -> dict[str, object]:
     """Return a conservative environment status without importing py-feat."""
     conda = find_conda()
@@ -488,7 +509,7 @@ class SetupAssistant(tk.Tk):
             self.messages.put(("log", "下载线路：官方 PyPI 与官方 PyTorch 源。"))
         steps += [
             ("更新 pip", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "--upgrade", "pip", *pip_index]),
-            ("安装 PyTorch 与 CUDA 组件（最大下载）", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "torch==2.7.1+cu118", "torchvision==0.22.1+cu118", "--index-url", PYTORCH_CU118, "--extra-index-url", TUNA_PYPI if route == "tuna" else PYPI_OFFICIAL]),
+            ("安装 PyTorch 与 CUDA 组件（最大下载）", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "--retries", "10", "--timeout", "120", "torch==2.7.1+cu118", "torchvision==0.22.1+cu118", "--index-url", PYTORCH_CU118, "--extra-index-url", TUNA_PYPI if route == "tuna" else PYPI_OFFICIAL]),
             ("安装 Py-Feat 与分析依赖", [conda, "run", "-n", ENV_NAME, "python", "-m", "pip", "install", "py-feat==2.1.3", "opencv-python", "openpyxl", "matplotlib", *pip_index]),
         ]
         total_steps = len(steps)
@@ -507,7 +528,9 @@ class SetupAssistant(tk.Tk):
                 creationflags=CREATE_NO_WINDOW,
             )
             assert process.stdout is not None
+            output_lines: list[str] = []
             for line in process.stdout:
+                output_lines.append(line)
                 if "Downloading" in line:
                     self.messages.put(("install_detail", f"正在下载：{label}（下载速度会影响预计完成时间）"))
                 elif "Installing collected packages" in line:
@@ -516,7 +539,9 @@ class SetupAssistant(tk.Tk):
                     self.messages.put(("install_detail", f"正在完成本步骤：{label}"))
                 self.messages.put(("log", line.rstrip()))
             if process.wait() != 0:
-                self.messages.put(("log", "安装未完成：请复制上方最后的报错信息以便排查。"))
+                hint = install_failure_hint(label, "".join(output_lines))
+                self.messages.put(("log", "安装未完成：" + hint))
+                self.messages.put(("install_detail", hint))
                 succeeded = False
                 break
         self.messages.put(("install_done", succeeded))
@@ -538,3 +563,4 @@ class SetupAssistant(tk.Tk):
 
 if __name__ == "__main__":
     SetupAssistant().mainloop()
+
