@@ -34,6 +34,7 @@ if IS_FROZEN:
 TUNA_PYPI = "https://pypi.tuna.tsinghua.edu.cn/simple"
 PYPI_OFFICIAL = "https://pypi.org/simple"
 PYTORCH_CU118 = "https://download.pytorch.org/whl/cu118"
+MINICONDA_WINDOWS_INSTALLER = "https://pro.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
 # These are intentionally broad ranges.  Download speed, mirrors, disk speed,
 # and whether packages are cached make a precise install ETA dishonest.
 INSTALL_STEP_ESTIMATES = {
@@ -49,7 +50,23 @@ def find_conda() -> str | None:
     configured = os.environ.get("CONDA_EXE")
     if configured and Path(configured).is_file():
         return configured
-    return shutil.which("conda")
+    discovered = shutil.which("conda")
+    if discovered:
+        return discovered
+    # The Miniconda default on Windows is usually not added to PATH.  Search
+    # only the standard per-user/all-user locations, never arbitrary disks.
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    program_data = os.environ.get("PROGRAMDATA", "")
+    candidates = [
+        Path.home() / "miniconda3" / "Scripts" / "conda.exe",
+        Path.home() / "anaconda3" / "Scripts" / "conda.exe",
+        Path(local_app_data) / "miniconda3" / "Scripts" / "conda.exe" if local_app_data else None,
+        Path(program_data) / "miniconda3" / "Scripts" / "conda.exe" if program_data else None,
+    ]
+    for candidate in candidates:
+        if candidate and candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def run_capture(command: list[str]) -> tuple[int, str]:
@@ -340,8 +357,14 @@ class SetupAssistant(tk.Tk):
         threading.Thread(target=lambda: self.messages.put(("status", inspect_environment())), daemon=True).start()
 
     def open_conda_guide(self) -> None:
-        """Open the official installer instructions only after the user clicks."""
-        webbrowser.open("https://docs.anaconda.com/miniconda/", new=2)
+        """Explain the exact Windows installer before starting its download."""
+        messagebox.showinfo(
+            "应下载哪个版本？",
+            "请下载 Miniconda（Windows x86_64，64 位）。\n\n"
+            "不要选择 Kilo；也不需要安装 Anaconda Distribution。\n"
+            "安装时选 Just Me，并保持默认安装路径；装完后重新打开本助手。",
+        )
+        webbrowser.open(MINICONDA_WINDOWS_INSTALLER, new=2)
 
     def confirm_install(self) -> None:
         conda = find_conda()
