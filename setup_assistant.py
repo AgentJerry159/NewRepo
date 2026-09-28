@@ -357,14 +357,16 @@ class SetupAssistant(tk.Tk):
         threading.Thread(target=lambda: self.messages.put(("status", inspect_environment())), daemon=True).start()
 
     def open_conda_guide(self) -> None:
-        """Explain the exact Windows installer before starting its download."""
-        messagebox.showinfo(
+        """Explain and obtain confirmation before opening the Miniconda download."""
+        approved = messagebox.askyesno(
             "应下载哪个版本？",
             "请下载 Miniconda（Windows x86_64，64 位）。\n\n"
             "不要选择 Kilo；也不需要安装 Anaconda Distribution。\n"
-            "安装时选 Just Me，并保持默认安装路径；装完后重新打开本助手。",
+            "安装时选 Just Me，并保持默认安装路径；装完后重新打开本助手。\n\n"
+            "现在打开官方下载页吗？",
         )
-        webbrowser.open(MINICONDA_WINDOWS_INSTALLER, new=2)
+        if approved:
+            webbrowser.open(MINICONDA_WINDOWS_INSTALLER, new=2)
 
     def confirm_install(self) -> None:
         conda = find_conda()
