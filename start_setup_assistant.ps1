@@ -1,0 +1,77 @@
+$ErrorActionPreference = "Stop"
+
+function Show-Dialog {
+    param(
+        [string]$Title,
+        [string]$Message,
+        [string]$Buttons = "OK",
+        [string]$Icon = "Information"
+    )
+    Add-Type -AssemblyName PresentationFramework
+    return [System.Windows.MessageBox]::Show($Message, $Title, $Buttons, $Icon)
+}
+
+function Find-Conda {
+    if ($env:CONDA_EXE -and (Test-Path -LiteralPath $env:CONDA_EXE)) {
+        return $env:CONDA_EXE
+    }
+    $fromPath = Get-Command conda.exe -ErrorAction SilentlyContinue
+    if ($fromPath) {
+        return $fromPath.Source
+    }
+    $candidates = @(
+        (Join-Path $env:USERPROFILE "miniconda3\Scripts\conda.exe"),
+        (Join-Path $env:USERPROFILE "anaconda3\Scripts\conda.exe")
+    )
+    if ($env:LOCALAPPDATA) {
+        $candidates += Join-Path $env:LOCALAPPDATA "miniconda3\Scripts\conda.exe"
+    }
+    if ($env:PROGRAMDATA) {
+        $candidates += Join-Path $env:PROGRAMDATA "miniconda3\Scripts\conda.exe"
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+try {
+    $appDir = $PSScriptRoot
+    $assistant = Join-Path $appDir "setup_assistant.py"
+    if (-not (Test-Path -LiteralPath $assistant)) {
+        throw "Missing required file: setup_assistant.py"
+    }
+
+    $conda = Find-Conda
+    if ($conda) {
+        $details = (& $conda run -n base python $assistant 2>&1 | Out-String)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            throw "Conda returned exit code $exitCode.`n$details"
+        }
+        exit 0
+    }
+
+    $pythonLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($pythonLauncher) {
+        $details = (& $pythonLauncher.Source -3.11 $assistant 2>&1 | Out-String)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            throw "Python 3.11 returned exit code $exitCode.`n$details"
+        }
+        exit 0
+    }
+
+    $answer = Show-Dialog -Title "Miniconda required" -Message "Conda was not found. Install Miniconda for Windows x86_64 (64-bit). Choose Just Me and keep the default location. Open the official download now?" -Buttons "YesNo" -Icon "Information"
+    if ($answer -eq "Yes") {
+        Start-Process "https://pro.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
+    }
+}
+catch {
+    $logPath = Join-Path $PSScriptRoot "setup_launcher_error.log"
+    $_ | Out-String | Set-Content -LiteralPath $logPath -Encoding utf8
+    Show-Dialog -Title "Setup assistant could not open" -Message ("The setup window did not open. Please send a screenshot of this message and the file setup_launcher_error.log.\n\n" + $_.Exception.Message) -Icon "Error" | Out-Null
+    exit 1
+}
