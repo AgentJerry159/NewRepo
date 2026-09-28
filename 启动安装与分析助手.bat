@@ -33,9 +33,7 @@ if not errorlevel 1 (
 )
 
 echo Cannot find Conda or Python 3.11.
-echo Opening the required Miniconda installer in your browser.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$nl=[Environment]::NewLine; [System.Windows.MessageBox]::Show(('本电脑尚未安装运行本工具所需的 Conda。接下来会下载唯一需要的版本：Miniconda（Windows x86_64，64 位）。'+$nl+$nl+'请在安装器中选择 Just Me，保持默认安装路径即可；不需要选择 Kilo，也不需要安装 Anaconda Distribution。'+$nl+$nl+'安装完成后，重新双击本文件。'), '需要先安装 Miniconda', 'OK', 'Information')" >nul 2>nul
-start "" "https://pro.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
-pause
+rem Load PresentationFramework explicitly. The previous version suppressed its
+rem load failure, then opened the downloader unconditionally without any prompt.
+powershell -NoProfile -STA -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName PresentationFramework; $nl=[Environment]::NewLine; $msg='本电脑尚未安装运行本工具所需的 Conda。'+$nl+$nl+'需要安装的版本：Miniconda（Windows x86_64，64 位）。'+$nl+'不需要选择 Kilo，也不需要安装 Anaconda Distribution。'+$nl+$nl+'安装时选择 Just Me，并保持默认安装路径。'+$nl+$nl+'现在打开官方下载页吗？'; $answer=[System.Windows.MessageBox]::Show($msg, '需要先安装 Miniconda', 'YesNo', 'Information'); if ($answer -eq 'Yes') { Start-Process 'https://pro.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe' }"
 exit /b 1
-
