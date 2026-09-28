@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.log
 setup_launcher_error.log
+.pyfeat_conda_path.txt
 _qa_*/
 build_pyinstaller/
 *.spec
