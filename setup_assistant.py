@@ -43,10 +43,26 @@ INSTALL_STEP_ESTIMATES = {
     "安装 PyTorch 与 CUDA 组件（最大下载）": 1200,
     "安装 Py-Feat 与分析依赖": 600,
 }
+PACKAGE_LABELS = {
+    "py-feat": "Py-Feat",
+    "torch": "PyTorch",
+    "torchvision": "TorchVision",
+    "opencv-python": "OpenCV",
+    "openpyxl": "Excel 输出组件（openpyxl）",
+    "matplotlib": "绘图组件（matplotlib）",
+}
 
 
 def find_conda() -> str | None:
     """Find Conda without assuming an installation drive or user profile."""
+    saved_path_file = APP_DIR / ".pyfeat_conda_path.txt"
+    if saved_path_file.is_file():
+        try:
+            saved_path = Path(saved_path_file.read_text(encoding="utf-8").strip())
+            if saved_path.is_file():
+                return str(saved_path)
+        except OSError:
+            pass
     configured = os.environ.get("CONDA_EXE")
     if configured and Path(configured).is_file():
         return configured
@@ -59,9 +75,13 @@ def find_conda() -> str | None:
     program_data = os.environ.get("PROGRAMDATA", "")
     candidates = [
         Path.home() / "miniconda3" / "Scripts" / "conda.exe",
+        Path.home() / "miniconda3" / "condabin" / "conda.bat",
         Path.home() / "anaconda3" / "Scripts" / "conda.exe",
+        Path.home() / "anaconda3" / "condabin" / "conda.bat",
         Path(local_app_data) / "miniconda3" / "Scripts" / "conda.exe" if local_app_data else None,
+        Path(local_app_data) / "miniconda3" / "condabin" / "conda.bat" if local_app_data else None,
         Path(program_data) / "miniconda3" / "Scripts" / "conda.exe" if program_data else None,
+        Path(program_data) / "miniconda3" / "condabin" / "conda.bat" if program_data else None,
     ]
     for candidate in candidates:
         if candidate and candidate.is_file():
@@ -82,7 +102,7 @@ def run_capture(command: list[str]) -> tuple[int, str]:
     return completed.returncode, completed.stdout.strip()
 
 
-def inspect_environment() -> dict[str, str]:
+def inspect_environment() -> dict[str, object]:
     """Return a conservative environment status without importing py-feat."""
     conda = find_conda()
     result = {
@@ -90,6 +110,7 @@ def inspect_environment() -> dict[str, str]:
         "environment": "未检查",
         "packages": "未检查",
         "gpu": "未检查",
+        "summary": "尚未完成检查。",
         "detail": "",
         "conda_ok": False,
         "environment_ok": False,
@@ -97,12 +118,16 @@ def inspect_environment() -> dict[str, str]:
         "gpu_ok": False,
     }
     if not conda:
+        result["summary"] = "未找到 Conda，因此尚未建立本工具专用的 pyfeat_fatigue（Python 3.11）环境。"
         return result
     result["conda"] = conda
     result["conda_ok"] = True
     code, env_text = run_capture([conda, "env", "list", "--json"])
     if code != 0:
         result["environment"] = "Conda 无法列出环境"
+        result["packages"] = "未检查（需先解决 Conda 本身的问题）"
+        result["gpu"] = "未检查"
+        result["summary"] = "已找到 Conda，但它无法列出已有环境；请查看下方运行记录中的报错。"
         result["detail"] = env_text
         return result
     try:
@@ -111,36 +136,75 @@ def inspect_environment() -> dict[str, str]:
         environments = []
     matching = [Path(item) for item in environments if Path(item).name.lower() == ENV_NAME]
     if not matching:
-        result["environment"] = f"未找到环境 {ENV_NAME}"
+        result["environment"] = f"未创建：{ENV_NAME}（本工具使用 Python 3.11）"
+        result["packages"] = "尚未安装（需在新环境中安装）"
+        result["gpu"] = "尚未检查（安装 PyTorch 后检查）"
+        result["summary"] = (
+            "已找到 Conda，但尚未建立本工具专用环境 pyfeat_fatigue。"
+            "需要安装：Python 3.11、PyTorch/CUDA、Py-Feat、OpenCV、Excel 与绘图组件。"
+        )
         return result
     result["environment"] = f"已找到：{matching[0]}"
     result["environment_ok"] = True
+    # Conda run cannot pass a Python -c argument containing line breaks on
+    # Windows, so keep this metadata check as a single command-line string.
     probe = (
-        "import importlib.metadata as m, json; "
+        "import importlib.metadata as m, json, sys; "
         "names=['py-feat','torch','torchvision','opencv-python','openpyxl','matplotlib']; "
-        "versions={n: (m.version(n) if True else '') for n in names}; "
-        "import torch; "
-        "print(json.dumps({'versions':versions,'torch_cuda':torch.version.cuda,"
-        "'cuda_available':torch.cuda.is_available(),"
-        "'device':torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}, ensure_ascii=False))"
+        "installed={d.metadata['Name'].lower():d.version for d in m.distributions() if d.metadata['Name']}; "
+        "versions={n:installed[n] for n in names if n in installed}; "
+        "missing=[n for n in names if n not in installed]; "
+        "print(json.dumps({'python':sys.version.split()[0],'versions':versions,'missing':missing},ensure_ascii=False))"
     )
     code, probe_text = run_capture([conda, "run", "-n", ENV_NAME, "python", "-c", probe])
     if code != 0:
         result["packages"] = "环境存在，但关键依赖未完整安装"
+        result["gpu"] = "未检查（需先补齐依赖）"
+        result["summary"] = "已找到 pyfeat_fatigue 环境，但无法完成依赖检查；请查看下方运行记录中的报错。"
         result["detail"] = probe_text
         return result
     try:
         info = json.loads(probe_text.splitlines()[-1])
         versions = info["versions"]
+        missing = list(info["missing"])
+        if missing:
+            readable_missing = "、".join(PACKAGE_LABELS.get(name, name) for name in missing)
+            result["packages"] = f"缺少或无法使用：{readable_missing}"
+            result["gpu"] = "未检查（需先补齐上述组件）"
+            result["summary"] = (
+                f"已找到 pyfeat_fatigue（Python {info['python']}），但缺少或无法使用：{readable_missing}。"
+                "点击“创建／修复 GPU 环境”即可自动补齐，不会删除已有环境。"
+            )
+            return result
+        torch_probe = (
+            "import json,torch,torchvision; "
+            "print(json.dumps({'torch_cuda':torch.version.cuda,"
+            "'cuda_available':torch.cuda.is_available(),"
+            "'device':torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}))"
+        )
+        torch_code, torch_text = run_capture([conda, "run", "-n", ENV_NAME, "python", "-c", torch_probe])
+        if torch_code != 0:
+            result["packages"] = "PyTorch 或 TorchVision 已安装，但无法正常导入"
+            result["gpu"] = "未检查（需先修复 PyTorch）"
+            result["summary"] = (
+                "已找到 pyfeat_fatigue 环境，但 PyTorch/TorchVision 无法正常启动。"
+                "点击“创建／修复 GPU 环境”可重新安装匹配版本，不会删除已有环境。"
+            )
+            result["detail"] = torch_text
+            return result
+        torch_info = json.loads(torch_text.splitlines()[-1])
+        result["environment"] = f"已找到：{matching[0]}（Python {info['python']}）"
         result["packages"] = "已安装：" + "；".join(
-            f"{name} {version}" for name, version in versions.items()
+            f"{PACKAGE_LABELS.get(name, name)} {version}" for name, version in versions.items()
         )
         result["packages_ok"] = True
-        if info["cuda_available"]:
-            result["gpu"] = f"可用：{info['device']}（CUDA {info['torch_cuda']}）"
+        if torch_info["cuda_available"]:
+            result["gpu"] = f"可用：{torch_info['device']}（CUDA {torch_info['torch_cuda']}）"
             result["gpu_ok"] = True
+            result["summary"] = "分析环境和关键组件均已就绪，可使用 GPU 分析。"
         else:
             result["gpu"] = "未检测到可用 CUDA；仍可在主界面选择 CPU"
+            result["summary"] = "分析环境和关键组件已就绪；未检测到可用 GPU，仍可使用 CPU 分析。"
     except (json.JSONDecodeError, KeyError, IndexError):
         result["packages"] = "依赖检查返回格式异常"
         result["detail"] = probe_text
@@ -163,6 +227,7 @@ class SetupAssistant(tk.Tk):
         self.environment_status = tk.StringVar(value="尚未检查")
         self.package_status = tk.StringVar(value="尚未检查")
         self.gpu_status = tk.StringVar(value="尚未检查")
+        self.diagnosis_status = tk.StringVar(value="正在检查，请稍候。")
         self.next_step = tk.StringVar(value="正在检查，请稍候。")
         self.install_progress_text = tk.StringVar(value="尚未开始安装。")
         self.install_eta_text = tk.StringVar(value="")
@@ -190,6 +255,7 @@ class SetupAssistant(tk.Tk):
             ("分析环境", self.environment_status),
             ("关键依赖", self.package_status),
             ("GPU / CUDA", self.gpu_status),
+            ("检查结论", self.diagnosis_status),
         )):
             ttk.Label(card, text=f"{label}：", width=12).grid(row=row, column=0, sticky="nw", pady=3)
             ttk.Label(card, textvariable=variable, wraplength=670, justify="left").grid(row=row, column=1, sticky="w", pady=3)
@@ -271,6 +337,7 @@ class SetupAssistant(tk.Tk):
                     self.environment_status.set(str(status["environment"]))
                     self.package_status.set(str(status["packages"]))
                     self.gpu_status.set(str(status["gpu"]))
+                    self.diagnosis_status.set(str(status["summary"]))
                     self._apply_guidance(status)
                     self._append("环境检查完成。")
                     if status.get("detail"):
@@ -331,9 +398,24 @@ class SetupAssistant(tk.Tk):
             )
             self.install_button.configure(state="disabled")
             self.launch_button.configure(state="disabled")
-        elif not status.get("environment_ok") or not status.get("packages_ok"):
+        elif not status.get("environment_ok"):
+            environment_text = str(status.get("environment", ""))
+            if environment_text.startswith("未创建"):
+                self.next_step.set(
+                    "下一步：已找到 Conda，但 pyfeat_fatigue 环境尚未创建。直接点击“创建／修复 GPU 环境”，"
+                    "它会安装 Python 3.11、PyTorch、Py-Feat 和其他所需组件。"
+                )
+                self.install_button.configure(state="normal")
+            else:
+                self.next_step.set(
+                    "暂时无法读取 Conda 的环境列表。请查看下方运行记录中的报错；解决后再点“检查环境”。"
+                )
+                self.install_button.configure(state="disabled")
+            self.launch_button.configure(state="disabled")
+        elif not status.get("packages_ok"):
             self.next_step.set(
-                "下一步：直接点击“创建／修复 GPU 环境”。它会自动新建或补齐 pyfeat_fatigue 环境；首次约需 7 GB 磁盘和较长下载时间。"
+                "下一步：pyfeat_fatigue 环境已经存在，但“关键依赖”一栏列出的组件还缺失或无法使用。"
+                "点击“创建／修复 GPU 环境”即可补齐；不会删除已有环境。"
             )
             self.install_button.configure(state="normal")
             self.launch_button.configure(state="disabled")
@@ -456,4 +538,3 @@ class SetupAssistant(tk.Tk):
 
 if __name__ == "__main__":
     SetupAssistant().mainloop()
-
