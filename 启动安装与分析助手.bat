@@ -34,7 +34,7 @@ if not errorlevel 1 (
 
 echo Cannot find Conda or Python 3.11.
 echo Opening the required Miniconda installer in your browser.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('本电脑尚未安装运行本工具所需的 Conda。接下来会下载唯一需要的版本：Miniconda（Windows x86_64，64 位）。\n\n请在安装器中选择 Just Me，保持默认安装路径即可；不需要选择 Kilo，也不需要安装 Anaconda Distribution。\n\n安装完成后，重新双击本文件。', '需要先安装 Miniconda', 'OK', 'Information')" >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$nl=[Environment]::NewLine; [System.Windows.MessageBox]::Show(('本电脑尚未安装运行本工具所需的 Conda。接下来会下载唯一需要的版本：Miniconda（Windows x86_64，64 位）。'+$nl+$nl+'请在安装器中选择 Just Me，保持默认安装路径即可；不需要选择 Kilo，也不需要安装 Anaconda Distribution。'+$nl+$nl+'安装完成后，重新双击本文件。'), '需要先安装 Miniconda', 'OK', 'Information')" >nul 2>nul
 start "" "https://pro.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
 pause
 exit /b 1
