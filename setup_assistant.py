@@ -18,7 +18,7 @@ import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -295,6 +295,7 @@ class SetupAssistant(tk.Tk):
         buttons = ttk.Frame(outer)
         buttons.pack(fill="x", pady=12)
         ttk.Button(buttons, text="检查环境", command=self.check_environment).pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="手动指定 Conda 位置…", command=self.choose_conda_path).pack(side="left", padx=8)
         self.install_button = ttk.Button(buttons, text="创建／修复 GPU 环境", command=self.confirm_install)
         self.install_button.pack(side="left", padx=8)
         self.launch_button = ttk.Button(buttons, text="打开分析界面", command=self.launch_analysis)
@@ -476,6 +477,37 @@ class SetupAssistant(tk.Tk):
             return
         self._append("正在检查 Conda、分析环境、关键依赖和 CUDA……")
         threading.Thread(target=lambda: self.messages.put(("status", inspect_environment())), daemon=True).start()
+
+    def choose_conda_path(self) -> None:
+        """Let users select a non-default Conda installation once and reuse it."""
+        selected = filedialog.askopenfilename(
+            title="选择 Conda 启动文件",
+            initialdir=str(Path.home()),
+            filetypes=(
+                ("Conda 启动文件（conda.exe 或 conda.bat）", "conda.exe conda.bat"),
+                ("可执行文件", "*.exe"),
+                ("批处理文件", "*.bat"),
+                ("所有文件", "*.*"),
+            ),
+        )
+        if not selected:
+            return
+        selected_path = Path(selected)
+        if selected_path.name.lower() not in {"conda.exe", "conda.bat"}:
+            messagebox.showerror(
+                "选择错误",
+                "请选择 Conda 安装目录中的 conda.exe 或 conda.bat。\n"
+                "常见位置示例：D:\\Conda\\Scripts\\conda.exe",
+            )
+            return
+        try:
+            (APP_DIR / ".pyfeat_conda_path.txt").write_text(str(selected_path), encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("无法保存", f"无法保存 Conda 路径：\n{exc}")
+            return
+        self._append(f"已保存手动指定的 Conda 路径：{selected_path}")
+        self.install_progress_text.set("已保存 Conda 路径，正在重新检查环境。")
+        self.check_environment()
 
     def open_conda_guide(self) -> None:
         """Explain and obtain confirmation before opening the Miniconda download."""
