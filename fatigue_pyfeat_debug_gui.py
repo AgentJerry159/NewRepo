@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -75,6 +77,9 @@ class DebuggerGUI(tk.Tk):
         self.messages: queue.Queue[tuple[str, str]] = queue.Queue()
         self.process: subprocess.Popen[str] | None = None
         self.running = False
+        self.task_started_at: float | None = None
+        self.task_is_analysis = False
+        self.latest_progress = ""
 
         self._build()
         self.after(100, self._drain_messages)
@@ -84,7 +89,7 @@ class DebuggerGUI(tk.Tk):
         container = ttk.Frame(self, padding=14)
         container.pack(fill="both", expand=True)
         container.columnconfigure(1, weight=1)
-        container.rowconfigure(6, weight=1)
+        container.rowconfigure(7, weight=1)
 
         ttk.Label(container, text="原始视频文件夹：").grid(row=0, column=0, sticky="w", pady=5)
         ttk.Entry(container, textvariable=self.input_root).grid(row=0, column=1, sticky="ew", pady=5)
@@ -145,11 +150,38 @@ class DebuggerGUI(tk.Tk):
         self.open_button = ttk.Button(controls, text="打开结果文件夹", command=self._open_output)
         self.open_button.pack(side="left", padx=8)
 
-        ttk.Label(container, textvariable=self.status, foreground="#0b5394").grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 4))
+        model_controls = ttk.LabelFrame(container, text="首次模型准备／无外网电脑", padding=8)
+        model_controls.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 4))
+        self.prepare_models_button = ttk.Button(
+            model_controls,
+            text="准备／检查 Py-Feat 模型",
+            command=self._start_prepare_models,
+        )
+        self.prepare_models_button.pack(side="left")
+        self.export_models_button = ttk.Button(
+            model_controls,
+            text="导出离线模型包…",
+            command=self._export_model_cache,
+        )
+        self.export_models_button.pack(side="left", padx=8)
+        self.import_models_button = ttk.Button(
+            model_controls,
+            text="导入离线模型包…",
+            command=self._import_model_cache,
+        )
+        self.import_models_button.pack(side="left")
+        ttk.Label(
+            model_controls,
+            text="首次需联网下载；若工作站无法访问 Hugging Face，可在已成功运行的电脑导出 ZIP 后导入。",
+            foreground="#555555",
+            wraplength=430,
+        ).pack(side="left", padx=(12, 0))
+
+        ttk.Label(container, textvariable=self.status, foreground="#0b5394", wraplength=840).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 4))
         self.log = tk.Text(container, wrap="word", height=18, state="disabled", font=("Consolas", 10))
-        self.log.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        self.log.grid(row=7, column=0, columnspan=3, sticky="nsew")
         scroll = ttk.Scrollbar(container, orient="vertical", command=self.log.yview)
-        scroll.grid(row=6, column=3, sticky="ns")
+        scroll.grid(row=7, column=3, sticky="ns")
         self.log.configure(yscrollcommand=scroll.set)
         self._append("界面已就绪。建议先点“1. 预检（不分析）”。\n")
 
@@ -236,13 +268,64 @@ class DebuggerGUI(tk.Tk):
         command = build_core_command(["--output-root", str(output), "--summarize-only"])
         self._launch(command, "正在读取已有暂存结果并生成总表…")
 
-    def _launch(self, command: list[str], status_message: str) -> None:
+    def _start_prepare_models(self) -> None:
+        if self.running:
+            return
+        confirmed = messagebox.askokcancel(
+            "准备 Py-Feat 模型",
+            "这一步不读取视频。首次运行会从 Py-Feat 的模型服务器下载人脸检测与面部特征模型，"
+            "完成后通常不再需要联网。\n\n若当前电脑无法访问 Hugging Face，请在另一台已成功运行的电脑中导出离线模型包，再回到这里导入。\n\n现在开始吗？",
+        )
+        if confirmed:
+            self._launch(
+                build_core_command(["--prepare-models", "--device", self.device.get()]),
+                "正在准备 Py-Feat 模型…首次下载所需时间取决于网络速度。",
+                is_analysis=False,
+            )
+
+    def _export_model_cache(self) -> None:
+        if self.running:
+            return
+        selected = filedialog.asksaveasfilename(
+            title="保存 Py-Feat 离线模型包",
+            defaultextension=".zip",
+            initialfile="pyfeat_model_cache.zip",
+            filetypes=[("ZIP 压缩包", "*.zip")],
+        )
+        if selected:
+            self._launch(
+                build_core_command(["--export-model-cache", selected]),
+                "正在打包已缓存的 Py-Feat 模型…",
+                is_analysis=False,
+            )
+
+    def _import_model_cache(self) -> None:
+        if self.running:
+            return
+        selected = filedialog.askopenfilename(
+            title="选择另一台电脑导出的 Py-Feat 离线模型包",
+            filetypes=[("ZIP 压缩包", "*.zip")],
+        )
+        if selected:
+            self._launch(
+                build_core_command(["--import-model-cache", selected]),
+                "正在导入 Py-Feat 离线模型包…",
+                is_analysis=False,
+            )
+
+    def _launch(self, command: list[str], status_message: str, is_analysis: bool = True) -> None:
         self._append("\n运行：" + " ".join(f'\"{part}\"' if " " in part else part for part in command) + "\n")
         self.status.set(status_message)
         self.running = True
+        self.task_started_at = time.monotonic()
+        self.task_is_analysis = is_analysis
+        self.latest_progress = ""
         self.preflight_button.configure(state="disabled")
         self.run_button.configure(state="disabled")
         self.summary_button.configure(state="disabled")
+        self.prepare_models_button.configure(state="disabled")
+        self.export_models_button.configure(state="disabled")
+        self.import_models_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         thread = threading.Thread(target=self._run_subprocess, args=(command,), daemon=True)
         thread.start()
@@ -292,6 +375,7 @@ class DebuggerGUI(tk.Tk):
                 kind, value = self.messages.get_nowait()
                 if kind == "log":
                     self._append(value)
+                    self._update_progress_status(value)
                 elif kind == "finished":
                     self._set_finished(int(value))
                 else:
@@ -307,13 +391,38 @@ class DebuggerGUI(tk.Tk):
         self.preflight_button.configure(state="normal")
         self.run_button.configure(state="normal")
         self.summary_button.configure(state="normal")
+        self.prepare_models_button.configure(state="normal")
+        self.export_models_button.configure(state="normal")
+        self.import_models_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
+        elapsed = time.monotonic() - self.task_started_at if self.task_started_at is not None else None
+        elapsed_text = self._format_elapsed(elapsed)
+        self.task_started_at = None
         if code == 0:
-            self.status.set("任务完成。可点击“打开结果文件夹”查看结果。")
-            self._append("任务完成。\n")
+            self.status.set(f"任务完成，本次用时 {elapsed_text}。可点击“打开结果文件夹”查看结果。")
+            self._append(f"任务完成，本次用时 {elapsed_text}。\n")
         else:
-            self.status.set(f"任务结束，返回代码 {code}。请查看上方日志；检查点会保留。")
-            self._append(f"任务结束，返回代码 {code}。\n")
+            self.status.set(f"任务结束，返回代码 {code}，本次已用时 {elapsed_text}。请查看上方日志；检查点会保留。")
+            self._append(f"任务结束，返回代码 {code}，本次已用时 {elapsed_text}。\n")
+
+    @staticmethod
+    def _format_elapsed(seconds: float | None) -> str:
+        total = max(0, int(seconds or 0))
+        hours, remainder = divmod(total, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _update_progress_status(self, line: str) -> None:
+        """Promote core timing logs into the always-visible GUI status line."""
+        if "当前片段进度" not in line and "批处理总体进度" not in line:
+            return
+        message = re.sub(r"^.*?\|\s*(?:INFO\s*\|\s*)?", "", line.strip(), count=1)
+        if "当前片段进度" in message:
+            message = message[message.index("当前片段进度"):]
+        elif "批处理总体进度" in message:
+            message = message[message.index("批处理总体进度"):]
+        self.latest_progress = message
+        self.status.set(message)
 
     def _append(self, text: str) -> None:
         self.log.configure(state="normal")
