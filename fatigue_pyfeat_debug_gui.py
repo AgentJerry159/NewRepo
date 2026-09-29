@@ -71,6 +71,7 @@ class DebuggerGUI(tk.Tk):
         self.output_root = tk.StringVar(value=str((APP_DIR / "results").resolve()))
         self.device = tk.StringVar(value="cuda")
         self.sample_fps = tk.StringVar(value="12")
+        self.sample_preset = tk.StringVar(value="默认：每秒 12 帧")
         self.output_profile = tk.StringVar(value="compact")
         self.batch_size = tk.StringVar(value="8")
         self.status = tk.StringVar(value="请选择文件夹后先运行“预检”。")
@@ -106,9 +107,23 @@ class DebuggerGUI(tk.Tk):
         ttk.Label(options, text="设备：").grid(row=0, column=0, sticky="w")
         for column, (label, value) in enumerate((("GPU（推荐）", "cuda"), ("自动选择", "auto"), ("CPU", "cpu")), start=1):
             ttk.Radiobutton(options, text=label, variable=self.device, value=value).grid(row=0, column=column, padx=8)
-        ttk.Label(options, text="抽样率（fps）：").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(options, text="抽样率（fps，可小于 1）：").grid(row=1, column=0, sticky="w", pady=(10, 0))
         ttk.Entry(options, width=10, textvariable=self.sample_fps).grid(row=1, column=1, sticky="w", pady=(10, 0))
-        ttk.Label(options, text="默认 12；24 fps 视频会均匀每隔 2 个原始帧取 1 帧，可根据视频帧率自行调整。").grid(row=1, column=2, columnspan=2, sticky="w", pady=(10, 0))
+        preset = ttk.Combobox(
+            options,
+            textvariable=self.sample_preset,
+            state="readonly",
+            width=25,
+            values=(
+                "默认：每秒 12 帧",
+                "每秒 1 帧（1 fps）",
+                "每 3 秒 1 帧（0.333333 fps）",
+                "每 5 秒 1 帧（0.2 fps）",
+            ),
+        )
+        preset.grid(row=1, column=2, sticky="w", pady=(10, 0), padx=(8, 0))
+        preset.bind("<<ComboboxSelected>>", self._apply_sample_preset)
+        ttk.Label(options, text="可直接填写小数；按视频时间轴均匀取样。24 fps 不是最低限制。").grid(row=1, column=3, sticky="w", pady=(10, 0), padx=(8, 0))
         ttk.Label(options, text="每批图片数：").grid(row=2, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(options, width=10, textvariable=self.batch_size).grid(row=2, column=1, sticky="w", pady=(8, 0))
         ttk.Label(options, text="以RTX 3060 为例建议先用 8；显存不足时改为 4。").grid(row=2, column=2, columnspan=2, sticky="w", pady=(8, 0))
@@ -209,6 +224,18 @@ class DebuggerGUI(tk.Tk):
         selected = filedialog.askdirectory(title="选择或新建结果文件夹", initialdir=self.output_root.get() or str(APP_DIR))
         if selected:
             self.output_root.set(selected)
+
+    def _apply_sample_preset(self, _event=None) -> None:
+        mapping = {
+            "默认：每秒 12 帧": "12",
+            "每秒 1 帧（1 fps）": "1",
+            # Keep enough precision that the fixed time grid remains 0, 3, 6… seconds.
+            "每 3 秒 1 帧（0.333333 fps）": "0.3333333333333333",
+            "每 5 秒 1 帧（0.2 fps）": "0.2",
+        }
+        selected = mapping.get(self.sample_preset.get())
+        if selected is not None:
+            self.sample_fps.set(selected)
 
     def _validate(self) -> tuple[Path, Path] | None:
         source = Path(self.input_root.get()).expanduser()
