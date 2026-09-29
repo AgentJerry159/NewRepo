@@ -347,6 +347,23 @@ class SetupAssistant(tk.Tk):
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _format_environment_report(self, status: dict[str, object]) -> str:
+        """Make the check result readable in the running log, not only in cards."""
+        conda_mark = "正常" if status.get("conda_ok") else "需处理"
+        environment_mark = "正常" if status.get("environment_ok") else "需处理"
+        packages_mark = "正常" if status.get("packages_ok") else "需处理"
+        gpu_mark = "可用" if status.get("gpu_ok") else "可选／未就绪"
+        return "\n".join((
+            "========== 环境检查结果 ==========" ,
+            f"[{conda_mark}] Conda：{status['conda']}",
+            f"[{environment_mark}] 分析环境：{status['environment']}",
+            f"[{packages_mark}] 关键依赖：{status['packages']}",
+            f"[{gpu_mark}] GPU / CUDA：{status['gpu']}",
+            f"结论：{status['summary']}",
+            f"下一步：{self.next_step.get()}",
+            "================================",
+        ))
+
     def _drain_messages(self) -> None:
         try:
             while True:
@@ -360,7 +377,8 @@ class SetupAssistant(tk.Tk):
                     self.gpu_status.set(str(status["gpu"]))
                     self.diagnosis_status.set(str(status["summary"]))
                     self._apply_guidance(status)
-                    self._append("环境检查完成。")
+                    self.install_progress_text.set(str(status["summary"]))
+                    self._append(self._format_environment_report(status))
                     if status.get("detail"):
                         self._append(str(status["detail"]))
                 elif kind == "log":
@@ -556,7 +574,9 @@ class SetupAssistant(tk.Tk):
             return
         try:
             subprocess.Popen([conda, "run", "-n", ENV_NAME, "pythonw", str(MAIN_GUI)], cwd=APP_DIR, creationflags=CREATE_NO_WINDOW)
-            self._append("已请求打开分析主界面。若未出现窗口，请先点击“检查环境”。")
+            self.install_progress_text.set("环境已准备就绪，正在打开分析界面……")
+            self.install_eta_text.set("分析界面打开后即可选择视频与结果文件夹，先执行“预检（不分析）”，再开始批量分析。")
+            self._append("环境已准备就绪；已请求打开分析主界面。若数秒后未出现窗口，请重新点击“检查环境”。")
         except OSError as exc:
             messagebox.showerror("无法启动", str(exc))
 
