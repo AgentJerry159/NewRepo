@@ -130,7 +130,7 @@ class DebuggerGUI(tk.Tk):
         ttk.Label(options, text="输出字段：").grid(row=3, column=0, sticky="nw", pady=(10, 0))
         ttk.Radiobutton(
             options,
-            text="精简指标（推荐，约 35 列）",
+            text="精简指标（推荐，约 37 列，含效价/唤醒度）",
             variable=self.output_profile,
             value="compact",
         ).grid(row=3, column=1, sticky="w", pady=(10, 0))
@@ -303,7 +303,7 @@ class DebuggerGUI(tk.Tk):
             return
         confirmed = messagebox.askokcancel(
             "确认汇总",
-            "会读取该中间暂存文件夹内所有已完成片段的 frame_features.xlsx，重建总 Excel 和统一时间轴。不会重新分析视频。\n\n是否开始？",
+            "会读取该中间暂存文件夹内所有已完成片段的“逐帧原始数据.xlsx”，重建总 Excel 和统一时间轴。不会重新分析视频。\n\n是否开始？",
         )
         if not confirmed:
             return
