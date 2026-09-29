@@ -139,24 +139,11 @@ class DebuggerGUI(tk.Tk):
             wraplength=780,
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 8))
 
-        controls = ttk.Frame(container)
-        controls.grid(row=4, column=0, columnspan=3, sticky="w", pady=4)
-        self.preflight_button = ttk.Button(controls, text="1. 预检（不分析）", command=lambda: self._start(dry_run=True))
-        self.preflight_button.pack(side="left")
-        self.run_button = ttk.Button(controls, text="2. 开始批量分析", command=lambda: self._start(dry_run=False))
-        self.run_button.pack(side="left", padx=8)
-        self.summary_button = ttk.Button(controls, text="3. 汇总已有暂存结果", command=self._start_summary)
-        self.summary_button.pack(side="left")
-        self.stop_button = ttk.Button(controls, text="停止当前任务（可断点续跑）", command=self._stop, state="disabled")
-        self.stop_button.pack(side="left", padx=8)
-        self.open_button = ttk.Button(controls, text="打开结果文件夹", command=self._open_output)
-        self.open_button.pack(side="left", padx=8)
-
-        model_controls = ttk.LabelFrame(container, text="首次模型准备／无外网电脑", padding=8)
-        model_controls.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 4))
+        model_controls = ttk.LabelFrame(container, text="第 1 步：确认 Py-Feat 模型（首次使用或换电脑时）", padding=8)
+        model_controls.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 4))
         self.prepare_models_button = ttk.Button(
             model_controls,
-            text="准备／检查 Py-Feat 模型",
+            text="联网下载／检查模型",
             command=self._start_prepare_models,
         )
         self.prepare_models_button.pack(side="left")
@@ -184,13 +171,26 @@ class DebuggerGUI(tk.Tk):
         ttk.Label(
             model_controls,
             text=(
-                "已检测到随附模型：请先点“导入随附离线模型（推荐）”，程序会自动验证。"
+                "已检测到随附模型：先点“导入随附离线模型（推荐）”，程序会自动验证；之后无需重复操作。"
                 if self.bundled_model_cache.is_file()
-                else "首次需联网下载；若工作站无法访问 Hugging Face，可在已成功运行的电脑导出 ZIP 后导入。"
+                else "没有离线包时，使用“联网下载／检查模型”；若无法访问 Hugging Face，请导入其他电脑导出的 ZIP。"
             ),
             foreground="#555555",
             wraplength=430,
         ).pack(side="left", padx=(12, 0))
+
+        controls = ttk.Frame(container)
+        controls.grid(row=5, column=0, columnspan=3, sticky="w", pady=4)
+        self.preflight_button = ttk.Button(controls, text="2. 预检（不分析）", command=lambda: self._start(dry_run=True))
+        self.preflight_button.pack(side="left")
+        self.run_button = ttk.Button(controls, text="3. 开始批量分析", command=lambda: self._start(dry_run=False))
+        self.run_button.pack(side="left", padx=8)
+        self.summary_button = ttk.Button(controls, text="4. 汇总已有暂存结果", command=self._start_summary)
+        self.summary_button.pack(side="left")
+        self.stop_button = ttk.Button(controls, text="停止当前任务（可断点续跑）", command=self._stop, state="disabled")
+        self.stop_button.pack(side="left", padx=8)
+        self.open_button = ttk.Button(controls, text="打开结果文件夹", command=self._open_output)
+        self.open_button.pack(side="left", padx=8)
 
         ttk.Label(container, textvariable=self.status, foreground="#0b5394", wraplength=840).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 4))
         self.log = tk.Text(container, wrap="word", height=18, state="disabled", font=("Consolas", 10))
