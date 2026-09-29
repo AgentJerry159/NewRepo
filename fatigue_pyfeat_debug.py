@@ -24,8 +24,10 @@ import tempfile
 import time
 import traceback
 import types
+import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from importlib import util as importlib_util
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Iterable
@@ -48,6 +50,14 @@ SEGMENT_SECONDS = 300.0
 # five-minute clip at 12 fps is far below this; the combined workbook may not
 # be, so it is split into consecutive raw-data sheets when necessary.
 EXCEL_DATA_ROWS_PER_SHEET = 1_000_000
+# Detectorv2 in the configured compact/full profiles needs these two model
+# repositories.  ArcFace is deliberately excluded because identity vectors are
+# disabled in this project (``identity_model=None``).
+REQUIRED_MODEL_CACHE_DIRECTORIES = (
+    "models--py-feat--retinaface_r34",
+    "models--py-feat--face_multitask_v2",
+)
+MODEL_CACHE_MANIFEST_NAME = "pyfeat_model_cache_manifest.json"
 
 # The compact profile intentionally keeps only interpretable, frame-level
 # measures relevant to the present fatigue protocol.  It is 35 columns when
@@ -171,6 +181,106 @@ def format_eta(seconds: float | None) -> str:
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def format_expected_finish(seconds: float | None) -> str:
+    """Return a local-clock finish estimate, or a truthful placeholder."""
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return "速度建立中"
+    finish = datetime.now().astimezone() + timedelta(seconds=seconds)
+    return finish.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def pyfeat_resource_path() -> Path:
+    """Locate Py-Feat's package-owned model cache without importing Py-Feat.
+
+    Importing Py-Feat may trigger TorchCodec's Windows DLL failure, whereas
+    the package location is enough for model-cache export/import.
+    """
+    spec = importlib_util.find_spec("feat")
+    if spec is None or not spec.submodule_search_locations:
+        raise RuntimeError("未找到 py-feat。请先在安装助手中完成环境安装。")
+    return Path(next(iter(spec.submodule_search_locations))) / "resources"
+
+
+def cached_model_directories() -> tuple[Path, list[Path]]:
+    resource_path = pyfeat_resource_path()
+    directories = [resource_path / name for name in REQUIRED_MODEL_CACHE_DIRECTORIES]
+    return resource_path, directories
+
+
+def export_model_cache(archive_path: Path) -> dict[str, Any]:
+    """Create a portable archive of just the Detectorv2 models this tool uses."""
+    resource_path, model_directories = cached_model_directories()
+    missing = [directory.name for directory in model_directories if not directory.is_dir()]
+    if missing:
+        raise RuntimeError(
+            "本机尚未准备完整 Py-Feat 模型，不能导出离线模型包。缺少："
+            + "、".join(missing)
+            + "。请先点击“准备／检查 Py-Feat 模型”。"
+        )
+    archive_path = archive_path.expanduser().resolve()
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    file_count = 0
+    byte_count = 0
+    manifest = {
+        "format": "pyfeat-fatigue-model-cache-v1",
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "py_feat_version": environment_metadata("auto").get("py_feat"),
+        "directories": [directory.name for directory in model_directories],
+    }
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        archive.writestr(MODEL_CACHE_MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2))
+        for directory in model_directories:
+            for source in directory.rglob("*"):
+                if not source.is_file():
+                    continue
+                archive.write(source, source.relative_to(resource_path).as_posix())
+                file_count += 1
+                byte_count += source.stat().st_size
+    return {"archive": archive_path, "files": file_count, "bytes": byte_count, "manifest": manifest}
+
+
+def _safe_model_archive_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+    allowed_prefixes = tuple(f"{name}/" for name in REQUIRED_MODEL_CACHE_DIRECTORIES)
+    members: list[zipfile.ZipInfo] = []
+    for item in archive.infolist():
+        name = item.filename.replace("\\", "/")
+        relative = Path(name)
+        if name == MODEL_CACHE_MANIFEST_NAME:
+            continue
+        if not name or name.endswith("/"):
+            continue
+        if relative.is_absolute() or ".." in relative.parts or not name.startswith(allowed_prefixes):
+            raise RuntimeError("离线模型包包含不允许的文件路径，已取消导入。")
+        members.append(item)
+    if not members:
+        raise RuntimeError("离线模型包中没有可导入的 Py-Feat 模型文件。")
+    return members
+
+
+def import_model_cache(archive_path: Path) -> dict[str, Any]:
+    """Safely copy a user-selected offline model archive into Py-Feat's cache."""
+    archive_path = archive_path.expanduser().resolve()
+    if not archive_path.is_file():
+        raise RuntimeError(f"离线模型包不存在：{archive_path}")
+    resource_path, _model_directories = cached_model_directories()
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            members = _safe_model_archive_members(archive)
+            resource_path.mkdir(parents=True, exist_ok=True)
+            byte_count = 0
+            for item in members:
+                target = resource_path / Path(item.filename)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary = target.with_name(target.name + ".importing")
+                with archive.open(item) as source, temporary.open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+                temporary.replace(target)
+                byte_count += item.file_size
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("选择的文件不是有效的 Py-Feat 离线模型包。") from exc
+    return {"archive": archive_path, "files": len(members), "bytes": byte_count, "resource_path": resource_path}
 
 
 def expected_sample_count(frame_count: int, source_fps: float, sample_fps: float) -> int:
@@ -331,7 +441,25 @@ def load_detector(requested_device: str) -> tuple[Any, str, bool]:
         ) from exc
     # Identity embeddings are neither retained nor required by this study.
     # Passing None avoids running the separate ArcFace/FaceNet identity model.
-    detector = Detectorv2(device=device, identity_model=None)
+    try:
+        detector = Detectorv2(device=device, identity_model=None)
+    except Exception as exc:
+        details = f"{type(exc).__name__}: {exc}"
+        network_or_cache_error = any(
+            marker in details.lower()
+            for marker in ("localentrynotfounderror", "getaddrinfo", "connecterror", "huggingface")
+        )
+        if network_or_cache_error:
+            raise RuntimeError(
+                "Py-Feat 的人脸分析模型尚未保存在本机，而当前电脑无法连接 Hugging Face。"
+                "这不是视频、GPU 或抽样率问题。请任选一种方式处理：\n"
+                "1. 临时连接可访问 Hugging Face 的网络后，在分析界面点击“准备／检查 Py-Feat 模型”；\n"
+                "2. 在一台已成功运行本工具的电脑中点击“导出离线模型包”，"
+                "将生成的 ZIP 拷到本机后点击“导入离线模型包”。\n"
+                "导入完成后重新开始分析。原始错误："
+                + details
+            ) from exc
+        raise RuntimeError(f"Py-Feat 模型加载失败：{details}") from exc
     return detector, device, torchcodec_compatibility_used
 
 
@@ -799,16 +927,20 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
                 "processed_frames_before_run": len(processed_ids),
                 "estimated_total_samples": estimated_total_samples,
                 "samples_completed_this_run": samples_completed_this_run,
+                "elapsed_seconds_this_run": elapsed,
                 "estimated_remaining_seconds": eta_seconds,
+                "estimated_finish_local": format_expected_finish(eta_seconds),
             })
             logging.info(
-                "%s | 当前片段进度 %s/%s（%.1f%%） | %.2f 帧/秒 | 预计剩余 %s",
+                "%s | 当前片段进度 %s/%s（%.1f%%） | %.2f 帧/秒 | 已用时 %s | 预计剩余 %s | 预计完成 %s",
                 spec.path.name,
                 len(processed_ids) + samples_completed_this_run,
                 estimated_total_samples,
                 100 * (len(processed_ids) + samples_completed_this_run) / estimated_total_samples if estimated_total_samples else 0,
                 rate,
+                format_eta(elapsed),
                 format_eta(eta_seconds),
+                format_expected_finish(eta_seconds),
             )
         finally:
             for image_path in batch_paths:
@@ -951,7 +1083,7 @@ def run_dry_check(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", type=Path, help="递归扫描的原始视频目录")
-    parser.add_argument("--output-root", type=Path, required=True, help="共享的中间暂存/结果根目录；不会修改输入目录")
+    parser.add_argument("--output-root", type=Path, help="共享的中间暂存/结果根目录；不会修改输入目录")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto", help="推理设备，默认 auto")
     parser.add_argument("--sample-fps", type=float, default=12.0, help="Py-Feat 原始输出的抽样率，默认 12 fps")
     parser.add_argument(
@@ -961,11 +1093,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="输出字段模式：compact 为疲劳精简约 35 列；full 保存高维完整输出",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="单次送入模型的图片数；RTX 3060 建议从 8 开始")
-    parser.add_argument("--dry-run", action="store_true", help="仅检查命名、视频可读性、帧率和环境，不加载模型")
-    parser.add_argument(
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument("--dry-run", action="store_true", help="仅检查命名、视频可读性、帧率和环境，不加载模型")
+    operation.add_argument(
         "--summarize-only",
         action="store_true",
         help="只读取共享暂存目录内已完成的单片段 Excel，重建总表和统一时间轴；不重新推理",
+    )
+    operation.add_argument(
+        "--prepare-models",
+        action="store_true",
+        help="仅下载或检查 Py-Feat 所需模型；首次联网时执行一次，不读取视频",
+    )
+    operation.add_argument(
+        "--export-model-cache",
+        type=Path,
+        metavar="ZIP",
+        help="把本机已准备的 Py-Feat 模型导出为可转移的 ZIP 离线包",
+    )
+    operation.add_argument(
+        "--import-model-cache",
+        type=Path,
+        metavar="ZIP",
+        help="把其他电脑导出的 Py-Feat 模型 ZIP 导入本机缓存",
     )
     return parser
 
@@ -975,13 +1125,53 @@ def main() -> int:
     args = parser.parse_args()
     if args.sample_fps <= 0 or args.batch_size <= 0:
         parser.error("--sample-fps 和 --batch-size 必须为正数")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+    if args.prepare_models:
+        logging.info("正在准备 Py-Feat 基础模型；首次下载的时间取决于网络速度。")
+        try:
+            _detector, resolved_device, _compatibility = load_detector(args.device)
+        except Exception as exc:
+            logging.error("模型准备失败：%s", exc)
+            print(f"模型准备失败：{exc}", file=sys.stderr)
+            return 3
+        print(f"Py-Feat 模型已准备就绪（推理设备：{resolved_device}）。现在可以开始分析，之后通常不再需要联网。")
+        return 0
+
+    if args.export_model_cache is not None:
+        try:
+            report = export_model_cache(args.export_model_cache)
+        except Exception as exc:
+            logging.error("导出离线模型包失败：%s", exc)
+            print(f"导出离线模型包失败：{exc}", file=sys.stderr)
+            return 3
+        print(
+            f"离线模型包已导出：{report['archive']}（{report['files']} 个文件，"
+            f"{report['bytes'] / 1024 / 1024:.1f} MiB）。"
+        )
+        return 0
+
+    if args.import_model_cache is not None:
+        try:
+            report = import_model_cache(args.import_model_cache)
+        except Exception as exc:
+            logging.error("导入离线模型包失败：%s", exc)
+            print(f"导入离线模型包失败：{exc}", file=sys.stderr)
+            return 3
+        print(
+            f"离线模型包已导入：{report['files']} 个文件、{report['bytes'] / 1024 / 1024:.1f} MiB。"
+            "现在请点击“准备／检查 Py-Feat 模型”确认。"
+        )
+        return 0
+
+    if args.output_root is None:
+        parser.error("常规分析、预检或汇总需要 --output-root")
     args.output_root = args.output_root.resolve()
     if args.summarize_only:
         if args.dry_run:
             parser.error("--summarize-only 不能与 --dry-run 同时使用")
         if args.input_root is not None:
             parser.error("汇总模式不需要 --input-root；请只指定 --output-root")
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
         try:
             report = rebuild_combined_workbook(args.output_root)
         except Exception as exc:
@@ -1001,7 +1191,6 @@ def main() -> int:
     if args.output_root == args.input_root:
         parser.error("输出目录不能与输入目录相同，以免分析结果被重复扫描。")
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     clips, rejected = discover_clips(args.input_root)
     if not clips:
         print("没有发现符合命名规则的视频。期望格式如 27-1-4.mp4。", file=sys.stderr)
@@ -1021,7 +1210,13 @@ def main() -> int:
         return 2
 
     runtime_info = environment_metadata(args.device)
-    detector, resolved_device, torchcodec_compatibility_used = load_detector(args.device)
+    logging.info("正在加载 Py-Feat 模型；首次运行或未缓存模型时需要网络。")
+    try:
+        detector, resolved_device, torchcodec_compatibility_used = load_detector(args.device)
+    except Exception as exc:
+        logging.error("无法开始分析：%s", exc)
+        print(f"无法开始分析：{exc}", file=sys.stderr)
+        return 3
     runtime_info["torchcodec_image_only_compatibility_used"] = torchcodec_compatibility_used
     estimated_new_rows: dict[Path, int] = {}
     for spec in clips:
@@ -1056,11 +1251,13 @@ def main() -> int:
             remaining = max(estimated_batch_remaining - batch_new_rows, 0)
             eta_seconds = remaining / rate if rate > 0 else None
             logging.info(
-                "批处理总体进度：新完成 %s/%s 帧 | %.2f 帧/秒 | 预计剩余 %s",
+                "批处理总体进度：新完成 %s/%s 帧 | %.2f 帧/秒 | 已用时 %s | 预计剩余 %s | 预计完成 %s",
                 batch_new_rows,
                 estimated_batch_remaining,
                 rate,
+                format_eta(elapsed),
                 format_eta(eta_seconds),
+                format_expected_finish(eta_seconds),
             )
         except Exception as exc:
             logging.exception("片段失败：%s", spec.path.name)
