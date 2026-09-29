@@ -58,12 +58,19 @@ try {
     $conda = Find-Conda
     $pythonLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
     if (-not $conda -and $pythonLauncher) {
-        $details = (& $pythonLauncher.Source -3.11 $assistant 2>&1 | Out-String)
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -ne 0) {
-            throw "Python 3.11 returned exit code $exitCode.`n$details"
+        # A new Windows computer may have py.exe but no Python 3.11.  That is
+        # not a usable runtime for this tool, so continue to the Miniconda
+        # guidance instead of showing a technical launcher error.
+        & $pythonLauncher.Source -3.11 -c "import sys; print(sys.executable)" *> $null
+        $hasPython311 = ($LASTEXITCODE -eq 0)
+        if ($hasPython311) {
+            $details = (& $pythonLauncher.Source -3.11 $assistant 2>&1 | Out-String)
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+                throw "Python 3.11 returned exit code $exitCode.`n$details"
+            }
+            exit 0
         }
-        exit 0
     }
     if (-not $conda) {
         $answer = Show-Dialog -Title "Conda was not found" -Message "Conda was not found in the usual folders. If you installed it in another folder, choose No and select conda.exe or conda.bat manually. Choose Yes only if Conda was not installed completely and you need the official Miniconda installer." -Buttons "YesNoCancel" -Icon "Information"
