@@ -209,6 +209,18 @@ def cached_model_directories() -> tuple[Path, list[Path]]:
     return resource_path, directories
 
 
+def has_complete_local_model_cache() -> bool:
+    """Whether both models have local files and can be loaded without a Hub call."""
+    try:
+        _resource_path, model_directories = cached_model_directories()
+    except RuntimeError:
+        return False
+    return all(
+        directory.is_dir() and any(path.is_file() and path.stat().st_size > 0 for path in directory.rglob("*"))
+        for directory in model_directories
+    )
+
+
 def export_model_cache(archive_path: Path) -> dict[str, Any]:
     """Create a portable archive of just the Detectorv2 models this tool uses."""
     resource_path, model_directories = cached_model_directories()
@@ -431,6 +443,13 @@ def import_detector_v2() -> tuple[Any, bool]:
 
 def load_detector(requested_device: str) -> tuple[Any, str, bool]:
     device = resolve_device(requested_device)
+    # Py-Feat/Hugging Face otherwise checks the network even when the needed
+    # files are already present.  For a reproducible research workflow this
+    # program prefers its verified local cache, so an unstable or unavailable
+    # Hugging Face connection cannot stop ordinary subsequent analyses.
+    if has_complete_local_model_cache():
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        logging.info("检测到完整的本地 Py-Feat 模型缓存；将离线加载，不访问 Hugging Face。")
     try:
         Detectorv2, torchcodec_compatibility_used = import_detector_v2()
     except (ImportError, OSError, RuntimeError) as exc:
