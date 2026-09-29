@@ -59,8 +59,30 @@ REQUIRED_MODEL_CACHE_DIRECTORIES = (
 )
 MODEL_CACHE_MANIFEST_NAME = "pyfeat_model_cache_manifest.json"
 
+# Names shown to researchers in newly created result folders.  The legacy
+# English names remain readable so that earlier batches can still resume and
+# be summarized after an upgrade.
+RESULTS_DIRECTORY_NAME = "视频分析结果"
+SESSION_DIRECTORY_NAME = "受试者时段时间轴"
+CLIP_EXCEL_NAME = "逐帧原始数据.xlsx"
+COMBINED_EXCEL_NAME = "全部分析原始数据.xlsx"
+PREFLIGHT_EXCEL_NAME = "预检结果.xlsx"
+CLIP_STATUS_NAME = "分析状态_内部.json"
+CLIP_METADATA_NAME = "分析信息_内部.json"
+CHECKPOINT_DIRECTORY_NAME = "检查点_内部"
+CHECKPOINT_PART_PREFIX = "检查点分块_"
+PER_CLIP_METADATA_SHEET = "运行信息"
+RAW_DATA_SHEET = "逐帧原始数据"
+
+LEGACY_RESULTS_DIRECTORY_NAME = "clips"
+LEGACY_CLIP_EXCEL_NAME = "frame_features.xlsx"
+LEGACY_CLIP_STATUS_NAME = "status.json"
+LEGACY_CLIP_METADATA_NAME = "metadata.json"
+LEGACY_CHECKPOINT_DIRECTORY_NAME = "checkpoint_parts"
+LEGACY_RAW_DATA_SHEET = "frames_raw"
+
 # The compact profile intentionally keeps only interpretable, frame-level
-# measures relevant to the present fatigue protocol.  It is 35 columns when
+# measures relevant to the present fatigue protocol.  It is 37 columns when
 # all fields are available, versus about 1,679 columns in full Py-Feat output.
 COMPACT_OUTPUT_COLUMNS = (
     "participant_id", "period_code", "segment_index", "source_frame_index",
@@ -70,9 +92,10 @@ COMPACT_OUTPUT_COLUMNS = (
     "AU11", "AU12", "AU14", "AU15", "AU17", "AU20", "AU23", "AU24",
     "AU25", "AU26", "AU28", "AU43",
     "Pitch", "Roll", "Yaw", "eyeBlinkLeft", "eyeBlinkRight",
+    "valence", "arousal",
 )
 OUTPUT_PROFILE_DESCRIPTIONS = {
-    "compact": "疲劳精简：时间轴、FaceScore/人脸检测、20 个 AU、三轴头姿及左右眨眼。",
+    "compact": "疲劳精简：时间轴、FaceScore/人脸检测、20 个 AU、三轴头姿、左右眨眼，以及模型估计的效价/唤醒度。",
     "full": "完整 Py-Feat：保存全部非身份向量输出，含 3D 网格、关键点和 Blendshape。",
 }
 
@@ -304,7 +327,36 @@ def expected_sample_count(frame_count: int, source_fps: float, sample_fps: float
 
 
 def clip_output_dir(output_root: Path, spec: ClipSpec) -> Path:
-    return output_root / "clips" / spec.session_key / f"segment_{spec.segment_index}_{spec.path.stem}"
+    return (
+        output_root
+        / RESULTS_DIRECTORY_NAME
+        / f"受试者{spec.participant_id}_时段{spec.period_code}"
+        / f"片段{spec.segment_index}_{spec.path.stem}"
+    )
+
+
+def legacy_clip_output_dir(output_root: Path, spec: ClipSpec) -> Path:
+    """Locate the pre-Chinese-name result layout when it already exists."""
+    return output_root / LEGACY_RESULTS_DIRECTORY_NAME / spec.session_key / f"segment_{spec.segment_index}_{spec.path.stem}"
+
+
+def reusable_clip_output_dir(output_root: Path, spec: ClipSpec) -> Path:
+    """Prefer the current Chinese layout, but safely continue an older batch."""
+    current = clip_output_dir(output_root, spec)
+    legacy = legacy_clip_output_dir(output_root, spec)
+    return legacy if not current.exists() and legacy.exists() else current
+
+
+def artifact_path(directory: Path, current_name: str, legacy_name: str) -> Path:
+    """Use a current artifact if present, otherwise transparently read legacy."""
+    current = directory / current_name
+    legacy = directory / legacy_name
+    return legacy if not current.exists() and legacy.exists() else current
+
+
+def checkpoint_part_paths(parts_dir: Path) -> list[Path]:
+    """Read current Chinese checkpoint files and prior English ones if present."""
+    return sorted([*parts_dir.glob(f"{CHECKPOINT_PART_PREFIX}*.csv"), *parts_dir.glob("part_*.csv")])
 
 
 def ffprobe_metadata(path: Path) -> dict[str, Any]:
@@ -491,7 +543,7 @@ def write_png_unicode(path: Path, frame) -> None:
 
 def load_processed_frame_ids(parts_dir: Path) -> set[int]:
     processed: set[int] = set()
-    for part in sorted(parts_dir.glob("part_*.csv")):
+    for part in checkpoint_part_paths(parts_dir):
         try:
             values = pd.read_csv(part, usecols=["source_frame_index"])["source_frame_index"]
             processed.update(int(value) for value in values.dropna().tolist())
@@ -608,27 +660,30 @@ def create_figures(frame: pd.DataFrame, output_dir: Path) -> list[str]:
         fig, ax = plt.subplots(figsize=(11, 3.5))
         ax.plot(x, frame[face_score_column], linewidth=0.7)
         ax.set(
-            title="Face detection confidence (FaceScore; quality control only)",
-            xlabel="Clip time (s)",
+            title="人脸检测置信度（FaceScore，仅用于质量检查）",
+            xlabel="片段内时间（秒）",
             ylabel=face_score_column,
         )
         ax.grid(alpha=0.25)
         fig.tight_layout()
-        target = output_dir / "face_detection_quality.png"
+        target = output_dir / "人脸检测质量.png"
         fig.savefig(target, dpi=180)
         plt.close(fig)
         images.append(target.name)
 
-    emotion_columns = [column for column in ("anger", "disgust", "fear", "happiness", "sadness", "surprise", "neutral") if column in frame.columns]
+    emotion_columns = [
+        column for column in ("Anger", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral")
+        if column in frame.columns
+    ]
     if emotion_columns:
         fig, ax = plt.subplots(figsize=(11, 5))
         for column in emotion_columns:
             ax.plot(x, frame[column], linewidth=0.7, label=column)
-        ax.set(title="Raw Py-Feat emotion outputs", xlabel="Clip time (s)", ylabel="Model output")
+        ax.set(title="Py-Feat 原始情绪输出", xlabel="片段内时间（秒）", ylabel="模型输出")
         ax.grid(alpha=0.25)
         ax.legend(ncol=4, fontsize=8)
         fig.tight_layout()
-        target = output_dir / "raw_emotion_timeseries.png"
+        target = output_dir / "原始情绪时间序列.png"
         fig.savefig(target, dpi=180)
         plt.close(fig)
         images.append(target.name)
@@ -636,32 +691,34 @@ def create_figures(frame: pd.DataFrame, output_dir: Path) -> list[str]:
 
 
 def export_clip_excel(parts_dir: Path, output_dir: Path, metadata: dict[str, Any]) -> pd.DataFrame:
-    parts = sorted(parts_dir.glob("part_*.csv"))
+    parts = checkpoint_part_paths(parts_dir)
     if not parts:
         raise RuntimeError("没有可导出的检查点分块。")
     frames = pd.concat([pd.read_csv(part) for part in parts], ignore_index=True, sort=False)
     frames = frames.drop_duplicates(subset=["source_frame_index"], keep="last").sort_values("source_frame_index")
-    excel_path = output_dir / "frame_features.xlsx"
+    excel_path = artifact_path(output_dir, CLIP_EXCEL_NAME, LEGACY_CLIP_EXCEL_NAME)
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-        pd.DataFrame([metadata]).to_excel(writer, sheet_name="metadata", index=False)
-        frames.to_excel(writer, sheet_name="frames_raw", index=False)
+        pd.DataFrame([metadata]).to_excel(writer, sheet_name=PER_CLIP_METADATA_SHEET, index=False)
+        frames.to_excel(writer, sheet_name=RAW_DATA_SHEET, index=False)
     return frames
 
 
 def raw_sheet_names(excel_path: Path) -> list[str]:
     """Return raw-data sheets in their workbook order.
 
-    ``frames_raw`` is used for a normal five-minute output.  The numbered
+    ``逐帧原始数据`` is used for a normal five-minute output.  The numbered
     variant also makes this reader forward-compatible with a large workbook
     that had to be split at Excel's row limit.
     """
     with pd.ExcelFile(excel_path, engine="openpyxl") as workbook:
         names = [
             name for name in workbook.sheet_names
-            if name == "frames_raw" or name.startswith("frames_raw_")
+            if name in (RAW_DATA_SHEET, LEGACY_RAW_DATA_SHEET)
+            or name.startswith(f"{RAW_DATA_SHEET}_")
+            or name.startswith(f"{LEGACY_RAW_DATA_SHEET}_")
         ]
     if not names:
-        raise RuntimeError(f"结果 Excel 中没有 frames_raw 工作表：{excel_path}")
+        raise RuntimeError(f"结果 Excel 中没有“{RAW_DATA_SHEET}”工作表：{excel_path}")
     return names
 
 
@@ -702,35 +759,41 @@ def existing_result_reason(
     # the only safe backward-compatible interpretation.
     if metadata.get("output_profile", "full") != output_profile:
         return "输出字段模式已经变化"
+    if output_profile == "compact" and metadata.get("output_columns_requested") != list(COMPACT_OUTPUT_COLUMNS):
+        return "精简指标字段已更新（新增 valence 与 arousal）"
     return None
 
 
 def completed_clip_entries(output_root: Path) -> list[tuple[ClipSpec, Path, dict[str, Any], pd.DataFrame]]:
     """Read canonical, completed per-clip files from the shared staging root."""
-    clips_root = output_root / "clips"
-    if not clips_root.is_dir():
-        return []
     entries: list[tuple[ClipSpec, Path, dict[str, Any], pd.DataFrame]] = []
-    for status_path in sorted(clips_root.rglob("status.json")):
-        clip_dir = status_path.parent
-        excel_path = clip_dir / "frame_features.xlsx"
-        if read_json(status_path).get("status") != "completed" or not excel_path.is_file():
+    roots_and_status_names = (
+        (output_root / RESULTS_DIRECTORY_NAME, CLIP_STATUS_NAME),
+        (output_root / LEGACY_RESULTS_DIRECTORY_NAME, LEGACY_CLIP_STATUS_NAME),
+    )
+    for clips_root, status_name in roots_and_status_names:
+        if not clips_root.is_dir():
             continue
-        metadata = read_json(clip_dir / "metadata.json")
-        try:
-            spec = ClipSpec(
-                path=Path(str(metadata.get("source_file", ""))),
-                participant_id=str(metadata["participant_id"]),
-                period_code=str(metadata["period_code"]),
-                segment_index=int(metadata["segment_index"]),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            logging.warning("跳过无法识别元数据的完成结果 %s：%s", clip_dir, exc)
-            continue
-        try:
-            entries.append((spec, excel_path, metadata, read_exported_frames(excel_path)))
-        except Exception as exc:
-            logging.warning("跳过无法读取的完成结果 %s：%s", excel_path, exc)
+        for status_path in sorted(clips_root.rglob(status_name)):
+            clip_dir = status_path.parent
+            excel_path = artifact_path(clip_dir, CLIP_EXCEL_NAME, LEGACY_CLIP_EXCEL_NAME)
+            if read_json(status_path).get("status") != "completed" or not excel_path.is_file():
+                continue
+            metadata = read_json(artifact_path(clip_dir, CLIP_METADATA_NAME, LEGACY_CLIP_METADATA_NAME))
+            try:
+                spec = ClipSpec(
+                    path=Path(str(metadata.get("source_file", ""))),
+                    participant_id=str(metadata["participant_id"]),
+                    period_code=str(metadata["period_code"]),
+                    segment_index=int(metadata["segment_index"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                logging.warning("跳过无法识别元数据的完成结果 %s：%s", clip_dir, exc)
+                continue
+            try:
+                entries.append((spec, excel_path, metadata, read_exported_frames(excel_path)))
+            except Exception as exc:
+                logging.warning("跳过无法读取的完成结果 %s：%s", excel_path, exc)
     return entries
 
 
@@ -743,7 +806,7 @@ def rebuild_combined_workbook(output_root: Path) -> dict[str, Any]:
     """
     entries = completed_clip_entries(output_root)
     if not entries:
-        raise RuntimeError("暂存目录内没有可汇总的已完成 frame_features.xlsx 文件。")
+        raise RuntimeError("暂存目录内没有可汇总的已完成“逐帧原始数据.xlsx”文件。")
 
     session_integrity, _ = inspect_session_integrity([entry[0] for entry in entries])
     session_timeline_export([(spec, frame) for spec, _excel, _meta, frame in entries], output_root, session_integrity)
@@ -777,25 +840,25 @@ def rebuild_combined_workbook(output_root: Path) -> dict[str, Any]:
     sort_columns = [column for column in ("participant_id", "period_code", "session_time_sec", "clip_time_sec") if column in all_frames.columns]
     if sort_columns:
         all_frames = all_frames.sort_values(sort_columns, kind="stable")
-    combined_path = output_root / "all_analysis_raw.xlsx"
+    combined_path = output_root / COMBINED_EXCEL_NAME
     combined_metadata = pd.DataFrame([{
         "generated_at_utc": utc_now(),
         "completed_clip_count": len(entries),
         "total_raw_rows": int(len(all_frames)),
         "target_analysis_fps_values": ",".join(sorted(analysis_fps)),
         "output_profile_values": ",".join(sorted(output_profiles)),
-        "raw_data_layout": "frames_raw_001...; split only when a sheet approaches Excel row limit",
+        "raw_data_layout": "逐帧原始数据_001...；仅在接近 Excel 行数上限时拆分工作表",
         "note": "仅合并已完成片段的原始 Py-Feat 输出；不计算均值、疲劳分数或分类。",
         "sampling_rate_warning": "" if len(analysis_fps) <= 1 else "暂存目录存在不同目标抽样率；不要把它们当作同一采样条件直接比较。",
         "output_profile_warning": "" if len(output_profiles) <= 1 else "暂存目录存在不同输出字段模式；总表保留各片段实际字段，不要将缺失列误解为零。",
     }])
     with pd.ExcelWriter(combined_path, engine="openpyxl") as writer:
-        combined_metadata.to_excel(writer, sheet_name="summary_metadata", index=False)
-        pd.DataFrame(clip_rows).to_excel(writer, sheet_name="clip_index", index=False)
-        pd.DataFrame(session_integrity).to_excel(writer, sheet_name="session_integrity", index=False)
+        combined_metadata.to_excel(writer, sheet_name="汇总信息", index=False)
+        pd.DataFrame(clip_rows).to_excel(writer, sheet_name="视频索引", index=False)
+        pd.DataFrame(session_integrity).to_excel(writer, sheet_name="片段完整性", index=False)
         for number, start in enumerate(range(0, len(all_frames), EXCEL_DATA_ROWS_PER_SHEET), start=1):
             all_frames.iloc[start:start + EXCEL_DATA_ROWS_PER_SHEET].to_excel(
-                writer, sheet_name=f"frames_raw_{number:03d}", index=False
+                writer, sheet_name=f"{RAW_DATA_SHEET}_{number:03d}", index=False
             )
     return {
         "combined_excel": combined_path,
@@ -816,23 +879,25 @@ def session_timeline_export(
     integrity_lookup = {row["session_key"]: row for row in session_integrity}
     for session_key, frames in grouped.items():
         all_frames = pd.concat(frames, ignore_index=True, sort=False).sort_values("session_time_sec")
-        target_dir = root / "sessions" / session_key
+        participant_id, period_code = session_key.split("-", maxsplit=1)
+        target_dir = root / SESSION_DIRECTORY_NAME / f"受试者{participant_id}_时段{period_code}"
         target_dir.mkdir(parents=True, exist_ok=True)
-        with pd.ExcelWriter(target_dir / "session_timeline_raw.xlsx", engine="openpyxl") as writer:
+        with pd.ExcelWriter(target_dir / "统一时间轴原始数据.xlsx", engine="openpyxl") as writer:
             pd.DataFrame([integrity_lookup.get(session_key, {"session_key": session_key})]).to_excel(
-                writer, sheet_name="session_metadata", index=False
+                writer, sheet_name="片段完整性", index=False
             )
-            all_frames.to_excel(writer, sheet_name="frames_raw", index=False)
+            all_frames.to_excel(writer, sheet_name=RAW_DATA_SHEET, index=False)
 
 
 def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str, runtime_info: dict[str, Any]) -> tuple[dict[str, Any], pd.DataFrame | None]:
-    clip_dir = clip_output_dir(args.output_root, spec)
-    parts_dir = clip_dir / "checkpoint_parts"
-    status_path = clip_dir / "status.json"
+    clip_dir = reusable_clip_output_dir(args.output_root, spec)
+    parts_dir = artifact_path(clip_dir, CHECKPOINT_DIRECTORY_NAME, LEGACY_CHECKPOINT_DIRECTORY_NAME)
+    status_path = artifact_path(clip_dir, CLIP_STATUS_NAME, LEGACY_CLIP_STATUS_NAME)
+    metadata_path = artifact_path(clip_dir, CLIP_METADATA_NAME, LEGACY_CLIP_METADATA_NAME)
     clip_dir.mkdir(parents=True, exist_ok=True)
-    existing_metadata = read_json(clip_dir / "metadata.json")
+    existing_metadata = read_json(metadata_path)
     existing_status = read_json(status_path)
-    completed_excel = clip_dir / "frame_features.xlsx"
+    completed_excel = artifact_path(clip_dir, CLIP_EXCEL_NAME, LEGACY_CLIP_EXCEL_NAME)
     if existing_status.get("status") == "completed" and completed_excel.is_file():
         reason = existing_result_reason(spec, existing_metadata, args.sample_fps, args.output_profile)
         if reason:
@@ -861,7 +926,7 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
             "resolved_device": existing_metadata.get("resolved_device", device),
         }, frames
 
-    has_checkpoint_parts = parts_dir.is_dir() and any(parts_dir.glob("part_*.csv"))
+    has_checkpoint_parts = parts_dir.is_dir() and bool(checkpoint_part_paths(parts_dir))
     if has_checkpoint_parts and existing_metadata:
         reason = existing_result_reason(spec, existing_metadata, args.sample_fps, args.output_profile)
         if reason:
@@ -894,7 +959,7 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
         "ffprobe": ffprobe_metadata(spec.path),
         "opencv": capture_metadata(spec.path),
     }
-    atomic_json_write(clip_dir / "metadata.json", metadata)
+    atomic_json_write(metadata_path, metadata)
     atomic_json_write(status_path, {"status": "running", "updated_at_utc": utc_now(), "processed_frames": len(processed_ids)})
 
     capture, backend = open_capture(spec.path)
@@ -909,7 +974,7 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
     batch_meta: list[dict[str, Any]] = []
     frame_index = 0
     next_sample_sec = 0.0
-    part_number = len(list(parts_dir.glob("part_*.csv"))) + 1
+    part_number = len(checkpoint_part_paths(parts_dir)) + 1
     temp_dir = Path(tempfile.mkdtemp(prefix="pyfeat_frames_"))
     previous_box: tuple[float, float, float, float] | None = None
     batch_count = 0
@@ -930,7 +995,7 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
             )
             records, previous_box = make_records(result_to_dataframe(result), batch_meta, previous_box)
             records = apply_output_profile(records, args.output_profile)
-            atomic_csv_write(parts_dir / f"part_{part_number:06d}.csv", records)
+            atomic_csv_write(parts_dir / f"{CHECKPOINT_PART_PREFIX}{part_number:06d}.csv", records)
             part_number += 1
             batch_count += 1
             samples_completed_this_run += len(records)
@@ -1026,7 +1091,7 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
         "figures": images,
         "checkpoint_parts_retained": False,
     })
-    atomic_json_write(clip_dir / "metadata.json", metadata)
+    atomic_json_write(metadata_path, metadata)
     atomic_json_write(status_path, {"status": "completed", "updated_at_utc": utc_now(), "frame_rows": int(len(frames))})
     try:
         # The final Excel is now the canonical result.  Checkpoints are only
@@ -1036,7 +1101,7 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
     except OSError as exc:
         metadata["checkpoint_parts_retained"] = True
         metadata["checkpoint_cleanup_warning"] = f"{type(exc).__name__}: {exc}"
-        atomic_json_write(clip_dir / "metadata.json", metadata)
+        atomic_json_write(metadata_path, metadata)
         logging.warning("已完成但无法清理检查点目录 %s：%s", parts_dir, exc)
     summary = {
         "status": "completed",
@@ -1064,10 +1129,10 @@ def write_manifest(
     rejected: list[dict[str, str]],
     session_integrity: list[dict[str, Any]],
 ) -> None:
-    with pd.ExcelWriter(output_root / "batch_manifest.xlsx", engine="openpyxl") as writer:
-        pd.DataFrame(rows).to_excel(writer, sheet_name="clip_status", index=False)
-        pd.DataFrame(rejected).to_excel(writer, sheet_name="rejected_filenames", index=False)
-        pd.DataFrame(session_integrity).to_excel(writer, sheet_name="session_integrity", index=False)
+    with pd.ExcelWriter(output_root / PREFLIGHT_EXCEL_NAME, engine="openpyxl") as writer:
+        pd.DataFrame(rows).to_excel(writer, sheet_name="视频状态", index=False)
+        pd.DataFrame(rejected).to_excel(writer, sheet_name="不符合命名的视频", index=False)
+        pd.DataFrame(session_integrity).to_excel(writer, sheet_name="片段完整性", index=False)
 
 
 def run_dry_check(
@@ -1092,10 +1157,10 @@ def run_dry_check(
             row = {"status": "cannot_open", "source_file": str(spec.path), "error": f"{type(exc).__name__}: {exc}"}
         rows.append(row)
     output_root.mkdir(parents=True, exist_ok=True)
-    atomic_json_write(output_root / "preflight_environment.json", environment_metadata(requested_device))
+    atomic_json_write(output_root / "预检环境_内部.json", environment_metadata(requested_device))
     write_manifest(output_root, rows, rejected, session_integrity)
     print(f"预检完成：有效命名视频 {len(clips)} 个；不符合命名规则 {len(rejected)} 个。")
-    print(f"预检结果：{output_root / 'batch_manifest.xlsx'}")
+    print(f"预检结果：{output_root / PREFLIGHT_EXCEL_NAME}")
     return 0 if all(row["status"] == "ready" for row in rows) else 2
 
 
@@ -1109,7 +1174,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-profile",
         choices=("compact", "full"),
         default="compact",
-        help="输出字段模式：compact 为疲劳精简约 35 列；full 保存高维完整输出",
+        help="输出字段模式：compact 为疲劳精简约 37 列；full 保存高维完整输出",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="单次送入模型的图片数；RTX 3060 建议从 8 开始")
     operation = parser.add_mutually_exclusive_group()
@@ -1242,12 +1307,13 @@ def main() -> int:
         try:
             video = capture_metadata(spec.path)
             expected = expected_sample_count(int(video["opencv_frame_count"]), float(video["opencv_fps"]), args.sample_fps)
-            clip_dir = clip_output_dir(args.output_root, spec)
-            existing_status = read_json(clip_dir / "status.json")
-            if existing_status.get("status") == "completed" and (clip_dir / "frame_features.xlsx").is_file():
+            clip_dir = reusable_clip_output_dir(args.output_root, spec)
+            existing_status = read_json(artifact_path(clip_dir, CLIP_STATUS_NAME, LEGACY_CLIP_STATUS_NAME))
+            completed_excel = artifact_path(clip_dir, CLIP_EXCEL_NAME, LEGACY_CLIP_EXCEL_NAME)
+            if existing_status.get("status") == "completed" and completed_excel.is_file():
                 existing = expected
             else:
-                existing = len(load_processed_frame_ids(clip_dir / "checkpoint_parts"))
+                existing = len(load_processed_frame_ids(artifact_path(clip_dir, CHECKPOINT_DIRECTORY_NAME, LEGACY_CHECKPOINT_DIRECTORY_NAME)))
             estimated_new_rows[spec.path] = max(expected - existing, 0)
         except Exception as exc:
             logging.warning("无法预估 %s 的工作量：%s", spec.path.name, exc)
