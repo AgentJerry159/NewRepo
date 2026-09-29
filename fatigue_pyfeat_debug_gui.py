@@ -80,6 +80,8 @@ class DebuggerGUI(tk.Tk):
         self.task_started_at: float | None = None
         self.task_is_analysis = False
         self.latest_progress = ""
+        self.next_command: tuple[list[str], str] | None = None
+        self.bundled_model_cache = APP_DIR / "pyfeat_model_cache.zip"
 
         self._build()
         self.after(100, self._drain_messages)
@@ -170,9 +172,22 @@ class DebuggerGUI(tk.Tk):
             command=self._import_model_cache,
         )
         self.import_models_button.pack(side="left")
+        if self.bundled_model_cache.is_file():
+            self.import_bundled_models_button = ttk.Button(
+                model_controls,
+                text="导入随附离线模型（推荐）",
+                command=self._import_bundled_model_cache,
+            )
+            self.import_bundled_models_button.pack(side="left", padx=8)
+        else:
+            self.import_bundled_models_button = None
         ttk.Label(
             model_controls,
-            text="首次需联网下载；若工作站无法访问 Hugging Face，可在已成功运行的电脑导出 ZIP 后导入。",
+            text=(
+                "已检测到随附模型：请先点“导入随附离线模型（推荐）”，程序会自动验证。"
+                if self.bundled_model_cache.is_file()
+                else "首次需联网下载；若工作站无法访问 Hugging Face，可在已成功运行的电脑导出 ZIP 后导入。"
+            ),
             foreground="#555555",
             wraplength=430,
         ).pack(side="left", padx=(12, 0))
@@ -309,23 +324,52 @@ class DebuggerGUI(tk.Tk):
         if selected:
             self._launch(
                 build_core_command(["--import-model-cache", selected]),
-                "正在导入 Py-Feat 离线模型包…",
+                "正在导入 Py-Feat 离线模型包；完成后会自动检查模型…",
                 is_analysis=False,
+                on_success_command=(
+                    build_core_command(["--prepare-models", "--device", self.device.get()]),
+                    "正在自动检查导入的 Py-Feat 模型…",
+                ),
             )
 
-    def _launch(self, command: list[str], status_message: str, is_analysis: bool = True) -> None:
+    def _import_bundled_model_cache(self) -> None:
+        if self.running:
+            return
+        if not self.bundled_model_cache.is_file():
+            messagebox.showerror("未找到随附模型", "没有在软件文件夹中找到 pyfeat_model_cache.zip，请改用“导入离线模型包…”。")
+            return
+        self._launch(
+            build_core_command(["--import-model-cache", str(self.bundled_model_cache)]),
+            "正在导入随附离线模型；完成后会自动检查模型…",
+            is_analysis=False,
+            on_success_command=(
+                build_core_command(["--prepare-models", "--device", self.device.get()]),
+                "正在自动检查导入的 Py-Feat 模型…",
+            ),
+        )
+
+    def _launch(
+        self,
+        command: list[str],
+        status_message: str,
+        is_analysis: bool = True,
+        on_success_command: tuple[list[str], str] | None = None,
+    ) -> None:
         self._append("\n运行：" + " ".join(f'\"{part}\"' if " " in part else part for part in command) + "\n")
         self.status.set(status_message)
         self.running = True
         self.task_started_at = time.monotonic()
         self.task_is_analysis = is_analysis
         self.latest_progress = ""
+        self.next_command = on_success_command
         self.preflight_button.configure(state="disabled")
         self.run_button.configure(state="disabled")
         self.summary_button.configure(state="disabled")
         self.prepare_models_button.configure(state="disabled")
         self.export_models_button.configure(state="disabled")
         self.import_models_button.configure(state="disabled")
+        if self.import_bundled_models_button is not None:
+            self.import_bundled_models_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         thread = threading.Thread(target=self._run_subprocess, args=(command,), daemon=True)
         thread.start()
@@ -394,10 +438,19 @@ class DebuggerGUI(tk.Tk):
         self.prepare_models_button.configure(state="normal")
         self.export_models_button.configure(state="normal")
         self.import_models_button.configure(state="normal")
+        if self.import_bundled_models_button is not None:
+            self.import_bundled_models_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
         elapsed = time.monotonic() - self.task_started_at if self.task_started_at is not None else None
         elapsed_text = self._format_elapsed(elapsed)
         self.task_started_at = None
+        next_command = self.next_command if code == 0 else None
+        self.next_command = None
+        if next_command is not None:
+            command, status_message = next_command
+            self._append("离线模型已导入，正在自动检查模型是否可用。\n")
+            self._launch(command, status_message, is_analysis=False)
+            return
         if code == 0:
             self.status.set(f"任务完成，本次用时 {elapsed_text}。可点击“打开结果文件夹”查看结果。")
             self._append(f"任务完成，本次用时 {elapsed_text}。\n")
