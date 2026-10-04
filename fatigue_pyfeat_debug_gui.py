@@ -29,6 +29,23 @@ if IS_FROZEN:
     APP_DIR = Path(sys.executable).resolve().parent
 
 
+CUSTOM_OUTPUT_GROUP_OPTIONS = (
+    ("face_quality", "人脸检测质量：FaceScore、人脸是否检测到"),
+    ("face_box", "人脸框与画面尺寸：位置、宽高、主脸选择规则"),
+    ("action_units", "20 个动作单元（AU）"),
+    ("head_orientation", "头部朝向：Pitch、Roll、Yaw"),
+    ("head_translation", "头部位置：X、Y、Z"),
+    ("blink", "左右眨眼：eyeBlinkLeft、eyeBlinkRight"),
+    ("affect", "情感维度：valence、arousal"),
+    ("emotion", "七类情绪原始输出"),
+    ("gaze", "注视方向：gaze_pitch、gaze_yaw、gaze_angle"),
+    ("landmarks_68", "68 点二维面部关键点（136 列）"),
+    ("mesh_3d", "478 点三维面部网格（1,434 列）"),
+    ("blendshapes", "ARKit 表情形状（52 列，含眨眼、嘴部等）"),
+)
+CUSTOM_OUTPUT_DEFAULT_GROUPS = {"face_quality", "action_units", "head_orientation", "blink", "affect"}
+
+
 def build_core_command(core_arguments: list[str]) -> list[str]:
     """Create a path-independent child-process command for the analysis core.
 
@@ -73,6 +90,9 @@ class DebuggerGUI(tk.Tk):
         self.sample_fps = tk.StringVar(value="12")
         self.sample_preset = tk.StringVar(value="默认：每秒 12 帧")
         self.output_profile = tk.StringVar(value="compact")
+        self.custom_groups: set[str] = set(CUSTOM_OUTPUT_DEFAULT_GROUPS)
+        self.custom_extra_columns = tk.StringVar(value="")
+        self.custom_output_summary = tk.StringVar()
         self.batch_size = tk.StringVar(value="8")
         self.status = tk.StringVar(value="请选择文件夹后先运行“预检”。")
         self.messages: queue.Queue[tuple[str, str]] = queue.Queue()
@@ -84,6 +104,7 @@ class DebuggerGUI(tk.Tk):
         self.next_command: tuple[list[str], str] | None = None
         self.bundled_model_cache = APP_DIR / "pyfeat_model_cache.zip"
 
+        self._update_custom_output_summary()
         self._build()
         self.after(100, self._drain_messages)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -140,12 +161,27 @@ class DebuggerGUI(tk.Tk):
             variable=self.output_profile,
             value="full",
         ).grid(row=3, column=2, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Radiobutton(
+            options,
+            text="自定义输出（自行勾选字段类别）",
+            variable=self.output_profile,
+            value="custom",
+        ).grid(row=4, column=1, sticky="w", pady=(8, 0))
+        ttk.Button(options, text="设置自定义字段…", command=self._open_custom_output_dialog).grid(
+            row=4, column=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Label(
+            options,
+            textvariable=self.custom_output_summary,
+            foreground="#555555",
+            wraplength=390,
+        ).grid(row=4, column=3, sticky="w", pady=(8, 0), padx=(8, 0))
         ttk.Label(
             options,
             text="完整模式会保存三维网格、关键点、Blendshape 等高维字段，显著增加磁盘占用、Excel 写入和汇总时间",
             foreground="#a61c00",
             wraplength=740,
-        ).grid(row=4, column=1, columnspan=3, sticky="w", pady=(2, 0))
+        ).grid(row=5, column=1, columnspan=3, sticky="w", pady=(2, 0))
 
         ttk.Label(
             container,
@@ -237,6 +273,76 @@ class DebuggerGUI(tk.Tk):
         if selected is not None:
             self.sample_fps.set(selected)
 
+    def _update_custom_output_summary(self) -> None:
+        labels = {
+            group_id: label.split("：", maxsplit=1)[0]
+            for group_id, label in CUSTOM_OUTPUT_GROUP_OPTIONS
+        }
+        selected = [labels[group_id] for group_id, _label in CUSTOM_OUTPUT_GROUP_OPTIONS if group_id in self.custom_groups]
+        extras = [value.strip() for value in self.custom_extra_columns.get().split(",") if value.strip()]
+        description = "、".join(selected) if selected else "仅时间轴"
+        if extras:
+            description += "；另加 " + "、".join(extras)
+        self.custom_output_summary.set("当前选择：" + description)
+
+    def _open_custom_output_dialog(self) -> None:
+        if self.running:
+            return
+        dialog = tk.Toplevel(self)
+        dialog.title("设置自定义输出字段")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        content = ttk.Frame(dialog, padding=14)
+        content.pack(fill="both", expand=True)
+        ttk.Label(
+            content,
+            text="下列时间和样本索引会始终保留：受试者、时段、片段、源帧号、片段/实验时间、抽样率。\n请选择还要保存的原始 Py-Feat 输出。勾选高维数据会明显增大 Excel。",
+            wraplength=620,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        variables: dict[str, tk.BooleanVar] = {}
+        for row, (group_id, label) in enumerate(CUSTOM_OUTPUT_GROUP_OPTIONS, start=1):
+            variable = tk.BooleanVar(value=group_id in self.custom_groups)
+            variables[group_id] = variable
+            ttk.Checkbutton(content, text=label, variable=variable).grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+
+        extra_row = len(CUSTOM_OUTPUT_GROUP_OPTIONS) + 1
+        ttk.Label(content, text="额外原始列名（可选，用英文逗号分隔）：").grid(row=extra_row, column=0, sticky="w", pady=(10, 2))
+        extra_value = tk.StringVar(value=self.custom_extra_columns.get())
+        ttk.Entry(content, textvariable=extra_value, width=66).grid(row=extra_row, column=1, sticky="ew", pady=(10, 2))
+        ttk.Label(
+            content,
+            text="例如：AU12,gaze_pitch。拼写不在本次 Py-Feat 输出中的列会被自动跳过。",
+            foreground="#555555",
+        ).grid(row=extra_row + 1, column=0, columnspan=2, sticky="w")
+
+        buttons = ttk.Frame(content)
+        buttons.grid(row=extra_row + 2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+        def use_compact_recommendation() -> None:
+            for group_id, variable in variables.items():
+                variable.set(group_id in CUSTOM_OUTPUT_DEFAULT_GROUPS)
+            extra_value.set("")
+
+        def save() -> None:
+            selected = {group_id for group_id, variable in variables.items() if variable.get()}
+            extras = [value.strip() for value in extra_value.get().split(",") if value.strip()]
+            if not selected and not extras:
+                messagebox.showerror("尚未选择字段", "请至少勾选一个输出类别，或填写一个额外原始列名。", parent=dialog)
+                return
+            self.custom_groups = selected
+            self.custom_extra_columns.set(",".join(dict.fromkeys(extras)))
+            self._update_custom_output_summary()
+            self.output_profile.set("custom")
+            dialog.destroy()
+
+        ttk.Button(buttons, text="恢复精简指标推荐项", command=use_compact_recommendation).pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="保存选择", command=save).pack(side="left")
+
     def _validate(self) -> tuple[Path, Path] | None:
         source = Path(self.input_root.get()).expanduser()
         output = Path(self.output_root.get()).expanduser()
@@ -275,6 +381,11 @@ class DebuggerGUI(tk.Tk):
                     "\n\n当前选择“完整 Py-Feat”：约 1679 列，会保存三维网格、关键点和 Blendshape，"
                     "显著增加磁盘空间、Excel 写入及汇总时间。"
                 )
+            elif self.output_profile.get() == "custom":
+                if not self.custom_groups and not self.custom_extra_columns.get().strip():
+                    messagebox.showerror("尚未设置自定义字段", "请先点击“设置自定义字段…”，至少选择一个输出类别。")
+                    return
+                profile_warning = "\n\n当前选择“自定义输出”：" + self.custom_output_summary.get().replace("当前选择：", "")
             confirmed = messagebox.askokcancel(
                 "确认开始分析",
                 "将以逐帧方式分析所选文件夹中的视频。已写入的检查点可在中断后续跑。"
@@ -290,6 +401,11 @@ class DebuggerGUI(tk.Tk):
             "--output-profile", self.output_profile.get(),
             "--batch-size", self.batch_size.get(),
         ]
+        if self.output_profile.get() == "custom":
+            core_arguments.extend([
+                "--custom-groups", ",".join(sorted(self.custom_groups)),
+                "--custom-extra-columns", self.custom_extra_columns.get(),
+            ])
         if dry_run:
             core_arguments.append("--dry-run")
         command = build_core_command(core_arguments)
