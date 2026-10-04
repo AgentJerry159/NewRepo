@@ -94,8 +94,27 @@ COMPACT_OUTPUT_COLUMNS = (
     "Pitch", "Roll", "Yaw", "eyeBlinkLeft", "eyeBlinkRight",
     "valence", "arousal",
 )
+TIME_AXIS_COLUMNS = (
+    "participant_id", "period_code", "segment_index", "source_frame_index",
+    "clip_time_sec", "session_time_sec", "target_analysis_fps", "source_fps",
+)
+CUSTOM_OUTPUT_GROUP_COLUMNS = {
+    "face_quality": ("FaceScore", "face_detected"),
+    "face_box": ("FaceRectX", "FaceRectY", "FaceRectWidth", "FaceRectHeight", "FrameHeight", "FrameWidth", "primary_face_rule"),
+    "action_units": ("AU01", "AU02", "AU04", "AU05", "AU06", "AU07", "AU09", "AU10", "AU11", "AU12", "AU14", "AU15", "AU17", "AU20", "AU23", "AU24", "AU25", "AU26", "AU28", "AU43"),
+    "head_orientation": ("Pitch", "Roll", "Yaw"),
+    "head_translation": ("X", "Y", "Z"),
+    "blink": ("eyeBlinkLeft", "eyeBlinkRight"),
+    "affect": ("valence", "arousal"),
+    "emotion": ("Neutral", "Happy", "Sad", "Surprise", "Fear", "Disgust", "Anger"),
+    "gaze": ("gaze_pitch", "gaze_yaw", "gaze_angle"),
+}
+CUSTOM_OUTPUT_GROUP_IDS = frozenset((*CUSTOM_OUTPUT_GROUP_COLUMNS, "landmarks_68", "mesh_3d", "blendshapes"))
+CUSTOM_OUTPUT_DEFAULT_GROUPS = ("face_quality", "action_units", "head_orientation", "blink", "affect")
+BLENDSHAPE_PREFIXES = ("brow", "cheek", "eye", "jaw", "mouth", "nose")
 OUTPUT_PROFILE_DESCRIPTIONS = {
     "compact": "疲劳精简：时间轴、FaceScore/人脸检测、20 个 AU、三轴头姿、左右眨眼，以及模型估计的效价/唤醒度。",
+    "custom": "自定义输出：固定保留时间轴，并按本次勾选的类别或字段保存原始 Py-Feat 输出。",
     "full": "完整 Py-Feat：保存全部非身份向量输出，含 3D 网格、关键点和 Blendshape。",
 }
 
@@ -599,10 +618,58 @@ def filter_identity_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.drop(columns=identity_columns, errors="ignore")
 
 
-def apply_output_profile(frame: pd.DataFrame, output_profile: str) -> pd.DataFrame:
+def parse_custom_values(raw: str, known: set[str] | None = None) -> tuple[str, ...]:
+    """Parse a comma-separated custom setting into stable, duplicate-free values."""
+    values = tuple(dict.fromkeys(value.strip() for value in raw.split(",") if value.strip()))
+    if known is not None:
+        unknown = sorted(set(values) - known)
+        if unknown:
+            raise ValueError("不支持的自定义输出类别：" + "、".join(unknown))
+    return values
+
+
+def custom_output_selection(groups: Iterable[str], extra_columns: Iterable[str]) -> dict[str, list[str]]:
+    return {
+        "groups": sorted(set(groups)),
+        "extra_columns": list(dict.fromkeys(column.strip() for column in extra_columns if column.strip())),
+    }
+
+
+def custom_columns_for_frame(
+    frame: pd.DataFrame,
+    groups: Iterable[str],
+    extra_columns: Iterable[str],
+) -> list[str]:
+    """Return requested custom raw fields in a stable, user-understandable order."""
+    selected = set(groups)
+    requested: list[str] = list(TIME_AXIS_COLUMNS)
+    for group_name, columns in CUSTOM_OUTPUT_GROUP_COLUMNS.items():
+        if group_name in selected:
+            requested.extend(columns)
+    if "landmarks_68" in selected:
+        requested.extend(column for column in frame.columns if column.startswith(("x_", "y_")))
+    if "mesh_3d" in selected:
+        requested.extend(column for column in frame.columns if column.startswith("mesh_"))
+    if "blendshapes" in selected:
+        requested.extend(
+            column for column in frame.columns
+            if column == "_neutral" or column.startswith(BLENDSHAPE_PREFIXES)
+        )
+    requested.extend(extra_columns)
+    return [column for column in dict.fromkeys(requested) if column in frame.columns]
+
+
+def apply_output_profile(
+    frame: pd.DataFrame,
+    output_profile: str,
+    custom_groups: Iterable[str] = (),
+    custom_extra_columns: Iterable[str] = (),
+) -> pd.DataFrame:
     """Keep the requested output fields without inventing any new feature."""
     if output_profile == "full":
         return filter_identity_columns(frame)
+    if output_profile == "custom":
+        return frame.loc[:, custom_columns_for_frame(frame, custom_groups, custom_extra_columns)].copy()
     if output_profile != "compact":
         raise ValueError(f"未知输出模式：{output_profile}")
     columns = [column for column in COMPACT_OUTPUT_COLUMNS if column in frame.columns]
@@ -735,6 +802,7 @@ def existing_result_reason(
     metadata: dict[str, Any],
     sample_fps: float,
     output_profile: str,
+    custom_selection: dict[str, list[str]],
 ) -> str | None:
     """Return why an existing output cannot safely be reused, if applicable."""
     recorded_source = metadata.get("source_file")
@@ -761,6 +829,8 @@ def existing_result_reason(
         return "输出字段模式已经变化"
     if output_profile == "compact" and metadata.get("output_columns_requested") != list(COMPACT_OUTPUT_COLUMNS):
         return "精简指标字段已更新（新增 valence 与 arousal）"
+    if output_profile == "custom" and metadata.get("custom_output_selection") != custom_selection:
+        return "自定义输出字段已经变化"
     return None
 
 
@@ -815,9 +885,12 @@ def rebuild_combined_workbook(output_root: Path) -> dict[str, Any]:
     raw_frames: list[pd.DataFrame] = []
     analysis_fps: set[str] = set()
     output_profiles: set[str] = set()
+    custom_selections: set[str] = set()
     for spec, excel_path, metadata, frame in entries:
         analysis_fps.add(str(metadata.get("target_analysis_fps", "unknown")))
         output_profiles.add(str(metadata.get("output_profile", "full")))
+        if metadata.get("output_profile") == "custom":
+            custom_selections.add(json.dumps(metadata.get("custom_output_selection", {}), ensure_ascii=False, sort_keys=True))
         clip_rows.append({
             "participant_id": spec.participant_id,
             "period_code": spec.period_code,
@@ -847,10 +920,11 @@ def rebuild_combined_workbook(output_root: Path) -> dict[str, Any]:
         "total_raw_rows": int(len(all_frames)),
         "target_analysis_fps_values": ",".join(sorted(analysis_fps)),
         "output_profile_values": ",".join(sorted(output_profiles)),
+        "custom_output_selection_values": "\n".join(sorted(custom_selections)),
         "raw_data_layout": "逐帧原始数据_001...；仅在接近 Excel 行数上限时拆分工作表",
         "note": "仅合并已完成片段的原始 Py-Feat 输出；不计算均值、疲劳分数或分类。",
         "sampling_rate_warning": "" if len(analysis_fps) <= 1 else "暂存目录存在不同目标抽样率；不要把它们当作同一采样条件直接比较。",
-        "output_profile_warning": "" if len(output_profiles) <= 1 else "暂存目录存在不同输出字段模式；总表保留各片段实际字段，不要将缺失列误解为零。",
+        "output_profile_warning": "" if len(output_profiles) <= 1 and len(custom_selections) <= 1 else "暂存目录存在不同输出字段模式或不同自定义字段选择；总表保留各片段实际字段，不要将缺失列误解为零。",
     }])
     with pd.ExcelWriter(combined_path, engine="openpyxl") as writer:
         combined_metadata.to_excel(writer, sheet_name="汇总信息", index=False)
@@ -899,7 +973,7 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
     existing_status = read_json(status_path)
     completed_excel = artifact_path(clip_dir, CLIP_EXCEL_NAME, LEGACY_CLIP_EXCEL_NAME)
     if existing_status.get("status") == "completed" and completed_excel.is_file():
-        reason = existing_result_reason(spec, existing_metadata, args.sample_fps, args.output_profile)
+        reason = existing_result_reason(spec, existing_metadata, args.sample_fps, args.output_profile, args.custom_output_selection)
         if reason:
             raise RuntimeError(
                 f"已有完成结果不能安全复用：{reason}。请改用新的中间暂存目录，避免混合分析条件。"
@@ -928,7 +1002,7 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
 
     has_checkpoint_parts = parts_dir.is_dir() and bool(checkpoint_part_paths(parts_dir))
     if has_checkpoint_parts and existing_metadata:
-        reason = existing_result_reason(spec, existing_metadata, args.sample_fps, args.output_profile)
+        reason = existing_result_reason(spec, existing_metadata, args.sample_fps, args.output_profile, args.custom_output_selection)
         if reason:
             raise RuntimeError(
                 f"未完成检查点不能安全续跑：{reason}。请改用新的中间暂存目录，避免混合分析条件。"
@@ -948,7 +1022,12 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
         "target_analysis_fps": args.sample_fps,
         "output_profile": args.output_profile,
         "output_profile_description": OUTPUT_PROFILE_DESCRIPTIONS[args.output_profile],
-        "output_columns_requested": list(COMPACT_OUTPUT_COLUMNS) if args.output_profile == "compact" else "all_non_identity_pyfeat_columns",
+        "output_columns_requested": (
+            list(COMPACT_OUTPUT_COLUMNS)
+            if args.output_profile == "compact"
+            else ("all_non_identity_pyfeat_columns" if args.output_profile == "full" else "custom_groups_and_extra_columns")
+        ),
+        "custom_output_selection": args.custom_output_selection if args.output_profile == "custom" else None,
         "requested_device": args.device,
         "resolved_device": device,
         "face_selection": "largest_stable",
@@ -994,7 +1073,12 @@ def process_clip(spec: ClipSpec, args: argparse.Namespace, detector, device: str
                 progress_bar=False,
             )
             records, previous_box = make_records(result_to_dataframe(result), batch_meta, previous_box)
-            records = apply_output_profile(records, args.output_profile)
+            records = apply_output_profile(
+                records,
+                args.output_profile,
+                args.custom_output_selection["groups"],
+                args.custom_output_selection["extra_columns"],
+            )
             atomic_csv_write(parts_dir / f"{CHECKPOINT_PART_PREFIX}{part_number:06d}.csv", records)
             part_number += 1
             batch_count += 1
@@ -1172,9 +1256,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-fps", type=float, default=12.0, help="Py-Feat 原始输出的抽样率，默认 12 fps")
     parser.add_argument(
         "--output-profile",
-        choices=("compact", "full"),
+        choices=("compact", "custom", "full"),
         default="compact",
-        help="输出字段模式：compact 为疲劳精简约 37 列；full 保存高维完整输出",
+        help="输出字段模式：compact 为疲劳精简约 37 列；custom 按勾选字段保存；full 保存高维完整输出",
+    )
+    parser.add_argument(
+        "--custom-groups",
+        default="",
+        help="自定义输出类别，使用英文逗号分隔；仅在 --output-profile custom 时使用",
+    )
+    parser.add_argument(
+        "--custom-extra-columns",
+        default="",
+        help="额外保留的原始列名，使用英文逗号分隔；仅在 --output-profile custom 时使用",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="单次送入模型的图片数；RTX 3060 建议从 8 开始")
     operation = parser.add_mutually_exclusive_group()
@@ -1209,6 +1303,14 @@ def main() -> int:
     args = parser.parse_args()
     if args.sample_fps <= 0 or args.batch_size <= 0:
         parser.error("--sample-fps 和 --batch-size 必须为正数")
+    try:
+        custom_groups = parse_custom_values(args.custom_groups, set(CUSTOM_OUTPUT_GROUP_IDS))
+        custom_extra_columns = parse_custom_values(args.custom_extra_columns)
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.custom_output_selection = custom_output_selection(custom_groups, custom_extra_columns)
+    if args.output_profile == "custom" and not (custom_groups or custom_extra_columns):
+        parser.error("自定义输出至少需要选择一个类别或填写一个原始列名。")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
     if args.prepare_models:
